@@ -34,7 +34,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "pretest": "npm run typecheck",
-    "test": "node --test 'test/*.test.js'",
+    "test": "node --test test/*.test.js",
     "pretest:live": "npm run typecheck",
     "test:live": "node --test test/integration.test.js",
     "codegen": "node codegen/codegen.mjs"
