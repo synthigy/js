@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Codegen scratch output (tool's own generated/ dir, not example artifacts)
+codegen/generated/
+
+# Test / coverage
+coverage/
+.nyc_output/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Generated example bundles
+examples/**/icons.bundle.js
+examples/**/dist/
+
+# Packing output
+*.tgz
+.npmrc
+
+# Secrets — NEVER commit
+.env
+.env.local
+*.pem
+*.key
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.iml
+.calva/
+*.swp
+
+# Agent scratch
+.claude/
+CLAUDE.md

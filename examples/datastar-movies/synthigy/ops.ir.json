@@ -1,0 +1,476 @@
+{
+  "sourceHash": "7ddab370f1ffcf9822408e2b1291343287ec9f72b6aae9b8d8417248a794734a",
+  "operations": [
+    {
+      "name": "list",
+      "op": "search",
+      "entity": "movie_actor",
+      "params": [
+        {
+          "name": "limit",
+          "type": "int",
+          "array": false,
+          "optional": true
+        },
+        {
+          "name": "offset",
+          "type": "int",
+          "array": false,
+          "optional": true
+        },
+        {
+          "name": "q",
+          "type": "string",
+          "array": false,
+          "optional": true
+        }
+      ],
+      "source": "movie_actor (limit ?limit:int=40, offset ?offset:int=0, order by name asc)\n  xid\n  name (ilike ?q:string=\"%\")\n  birth_year\n  nationality",
+      "description": "Actors A–Z. Filter by name with ?q (ilike).",
+      "watch": true,
+      "result": {
+        "kind": "object",
+        "fields": [
+          {
+            "key": "xid",
+            "type": "string",
+            "nullable": false
+          },
+          {
+            "key": "name",
+            "type": "string"
+          },
+          {
+            "key": "birth_year",
+            "type": "int"
+          },
+          {
+            "key": "nationality",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "name": "detail",
+      "op": "get",
+      "entity": "movie_actor",
+      "params": [
+        {
+          "name": "xid",
+          "type": "string",
+          "array": false
+        }
+      ],
+      "source": "movie_actor (xid = ?xid:string)\n  xid\n  name\n  birth_year\n  nationality\n  ->movies\n    xid\n    title\n    release_year\n    ->movie_ratings\n      value\n\n\n@workspace \"Movies & Ratings\"",
+      "description": "One actor by xid with their filmography and each movie's rating values.",
+      "watch": true,
+      "result": {
+        "kind": "object",
+        "fields": [
+          {
+            "key": "xid",
+            "type": "string",
+            "nullable": false
+          },
+          {
+            "key": "name",
+            "type": "string"
+          },
+          {
+            "key": "birth_year",
+            "type": "int"
+          },
+          {
+            "key": "nationality",
+            "type": "string"
+          },
+          {
+            "key": "movies",
+            "kind": "relation",
+            "cardinality": "many",
+            "optional": true,
+            "fields": [
+              {
+                "key": "xid",
+                "type": "string",
+                "nullable": false
+              },
+              {
+                "key": "title",
+                "type": "string"
+              },
+              {
+                "key": "release_year",
+                "type": "int"
+              },
+              {
+                "key": "movie_ratings",
+                "kind": "relation",
+                "cardinality": "many",
+                "optional": true,
+                "fields": [
+                  {
+                    "key": "xid",
+                    "type": "string",
+                    "nullable": false
+                  },
+                  {
+                    "key": "value",
+                    "type": "float",
+                    "nullable": false
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "list",
+      "op": "search",
+      "entity": "movie",
+      "params": [
+        {
+          "name": "since",
+          "type": "int",
+          "array": false,
+          "optional": true
+        },
+        {
+          "name": "limit",
+          "type": "int",
+          "array": false,
+          "optional": true
+        },
+        {
+          "name": "offset",
+          "type": "int",
+          "array": false,
+          "optional": true
+        },
+        {
+          "name": "q",
+          "type": "string",
+          "array": false,
+          "optional": true
+        }
+      ],
+      "source": "movie (release_year > ?since:int=1980, limit ?limit:int=20, offset ?offset:int=0, order by release_year desc)\n  xid\n  title (ilike ?q:string=\"%\")\n  release_year\n  _count\n    ratings:movie_ratings\n    actors:actors\n  _agg\n    ratings:movie_ratings\n      value: avg\n  ->genres\n    xid\n    name",
+      "description": "Movies newest-first with rating and actor counts, average rating and genres.\nFilter by title with ?q (ilike) and by minimum release year with ?since.",
+      "watch": true,
+      "result": {
+        "kind": "object",
+        "fields": [
+          {
+            "key": "xid",
+            "type": "string",
+            "nullable": false
+          },
+          {
+            "key": "title",
+            "type": "string"
+          },
+          {
+            "key": "release_year",
+            "type": "int"
+          },
+          {
+            "key": "_count",
+            "kind": "map",
+            "value": "int",
+            "optional": true
+          },
+          {
+            "key": "_agg",
+            "kind": "map",
+            "value": "unknown",
+            "optional": true
+          },
+          {
+            "key": "genres",
+            "kind": "relation",
+            "cardinality": "many",
+            "optional": true,
+            "fields": [
+              {
+                "key": "xid",
+                "type": "string",
+                "nullable": false
+              },
+              {
+                "key": "name",
+                "type": "string"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "detail",
+      "op": "get",
+      "entity": "movie",
+      "params": [
+        {
+          "name": "xid",
+          "type": "string",
+          "array": false
+        }
+      ],
+      "source": "movie (xid = ?xid:string)\n  xid\n  title\n  release_year\n  ->movie_ratings\n    xid\n    value\n    review\n    created_on\n    ->created_by\n      xid\n      name\n  ->genres\n    xid\n    name\n  ->actors\n    xid\n    name\n    birth_year\n    nationality",
+      "description": "One movie by xid — every rating with its reviewer, plus genres and full cast.",
+      "watch": true,
+      "result": {
+        "kind": "object",
+        "fields": [
+          {
+            "key": "xid",
+            "type": "string",
+            "nullable": false
+          },
+          {
+            "key": "title",
+            "type": "string"
+          },
+          {
+            "key": "release_year",
+            "type": "int"
+          },
+          {
+            "key": "movie_ratings",
+            "kind": "relation",
+            "cardinality": "many",
+            "optional": true,
+            "fields": [
+              {
+                "key": "xid",
+                "type": "string",
+                "nullable": false
+              },
+              {
+                "key": "value",
+                "type": "float",
+                "nullable": false
+              },
+              {
+                "key": "review",
+                "type": "string"
+              },
+              {
+                "key": "created_on",
+                "type": "timestamp"
+              },
+              {
+                "key": "created_by",
+                "kind": "relation",
+                "cardinality": "one",
+                "optional": true,
+                "fields": [
+                  {
+                    "key": "xid",
+                    "type": "string",
+                    "nullable": false
+                  },
+                  {
+                    "key": "name",
+                    "type": "string"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "key": "genres",
+            "kind": "relation",
+            "cardinality": "many",
+            "optional": true,
+            "fields": [
+              {
+                "key": "xid",
+                "type": "string",
+                "nullable": false
+              },
+              {
+                "key": "name",
+                "type": "string"
+              }
+            ]
+          },
+          {
+            "key": "actors",
+            "kind": "relation",
+            "cardinality": "many",
+            "optional": true,
+            "fields": [
+              {
+                "key": "xid",
+                "type": "string",
+                "nullable": false
+              },
+              {
+                "key": "name",
+                "type": "string"
+              },
+              {
+                "key": "birth_year",
+                "type": "int"
+              },
+              {
+                "key": "nationality",
+                "type": "string"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "list",
+      "op": "search",
+      "entity": "user_rating",
+      "params": [
+        {
+          "name": "limit",
+          "type": "int",
+          "array": false,
+          "optional": true
+        }
+      ],
+      "source": "user_rating (limit ?limit:int=20)\n  xid\n  value\n  ->movie\n    xid\n    title",
+      "description": "Latest ratings with the rated movie.",
+      "result": {
+        "kind": "object",
+        "fields": [
+          {
+            "key": "xid",
+            "type": "string",
+            "nullable": false
+          },
+          {
+            "key": "value",
+            "type": "float",
+            "nullable": false
+          },
+          {
+            "key": "movie",
+            "kind": "relation",
+            "cardinality": "one",
+            "optional": true,
+            "fields": [
+              {
+                "key": "xid",
+                "type": "string",
+                "nullable": false
+              },
+              {
+                "key": "title",
+                "type": "string"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "list",
+      "op": "search",
+      "entity": "movie_genre",
+      "params": [
+        {
+          "name": "limit",
+          "type": "int",
+          "array": false,
+          "optional": true
+        }
+      ],
+      "source": "movie_genre (limit ?limit:int=100, order by name asc)\n  xid\n  name",
+      "description": "All genres, alphabetical.",
+      "result": {
+        "kind": "object",
+        "fields": [
+          {
+            "key": "xid",
+            "type": "string",
+            "nullable": false
+          },
+          {
+            "key": "name",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "name": "count",
+      "op": "sql-template",
+      "entity": null,
+      "params": [
+        {
+          "name": "since",
+          "type": "int",
+          "array": false,
+          "optional": true
+        },
+        {
+          "name": "q",
+          "type": "string",
+          "array": false,
+          "optional": true
+        }
+      ],
+      "source": "SELECT count(*) AS total FROM {movie}\nWHERE release_year > ?since:int=1995 AND title ILIKE ?q:string=\"%\"",
+      "description": "Movie count under the same ?since / ?q filters the list uses.",
+      "namespace": "movie",
+      "result": {
+        "kind": "object",
+        "fields": [
+          {
+            "key": "total",
+            "type": "int",
+            "nullable": false
+          }
+        ]
+      }
+    },
+    {
+      "description": "Dashboard headline numbers — totals for movies, ratings and actors, plus the average rating.",
+      "name": "stats",
+      "params": [],
+      "op": "sql-template",
+      "source": "-- One CTE per entity, not scalar subqueries: RLS guards are injected per\n-- CTE scope, so each aggregate is scoped to what the caller may read.\nWITH m  AS (SELECT count(*) AS n FROM {movie}),\n     r  AS (SELECT count(*) AS n, avg({user_rating.value}) AS avg_value FROM {user_rating}),\n     ma AS (SELECT count(*) AS n FROM {movie_actor})\nSELECT m.n          AS total_movies,\n       r.n          AS total_ratings,\n       r.avg_value  AS avg_rating,\n       ma.n         AS total_actors\nFROM m, r, ma",
+      "result": {
+        "kind": "object",
+        "fields": [
+          {
+            "key": "total_movies",
+            "type": "int",
+            "nullable": false
+          },
+          {
+            "key": "total_ratings",
+            "type": "int",
+            "nullable": false
+          },
+          {
+            "key": "avg_rating",
+            "type": "float"
+          },
+          {
+            "key": "total_actors",
+            "type": "int",
+            "nullable": false
+          }
+        ]
+      },
+      "watch": [
+        "movie",
+        "user_rating",
+        "movie_actor"
+      ],
+      "entity": null,
+      "namespace": "dashboard"
+    }
+  ]
+}

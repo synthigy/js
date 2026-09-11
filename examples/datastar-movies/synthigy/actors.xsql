@@ -1,0 +1,25 @@
+@workspace "Movie Actors"
+
+@search list
+@description "Actors A–Z. Filter by name with ?q (ilike)."
+@watch
+movie_actor (limit ?limit:int=40, offset ?offset:int=0, order by name asc)
+  xid
+  name (ilike ?q:string="%")
+  birth_year
+  nationality
+
+@get detail
+@description "One actor by xid with their filmography and each movie's rating values."
+@watch
+movie_actor (xid = ?xid:string)
+  xid
+  name
+  birth_year
+  nationality
+  ->movies
+    xid
+    title
+    release_year
+    ->movie_ratings
+      value

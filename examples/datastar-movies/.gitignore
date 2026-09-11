@@ -1,0 +1,5 @@
+node_modules/
+
+# generated/ IS committed (kept in sync with synthigy/ops.ir.json) so the
+# example runs with just `npm install && npm start` — no server-side codegen
+# needed on first run. Regenerate with `npm run codegen:pull` after editing .xsql.

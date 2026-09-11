@@ -1,0 +1,188 @@
+/* datastar-movies — Tyrell-token COLOURS, avatars, the debug console, badges
+   and animations only. Layout/spacing lives in Tailwind utilities in the view
+   .ts files. Borders sit here too: with Tailwind preflight off, its `border`
+   utility sets width but not style, so a visible edge must come from CSS. */
+
+:root {
+  --ty-brand-hue: 95;        /* yellow — primary seeded from brand-hue */
+  --ty-brand-chroma: 0.15;
+  --font-body: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+/* Yellow needs lifting or it reads olive; black text on the solid fill. */
+html[data-theme="dark"] {
+  --ty-scrollbar-thumb: #5b5b5b38;
+  --ty-brand-chroma: 0.15;
+  --ty-solid-primary-fg: black;
+  --ty-solid-primary: oklch(0.88 0.17 95);
+  --ty-solid-primary-hover: oklch(0.83 0.18 95);
+  --ty-solid-primary-active: oklch(0.78 0.18 95);
+  --ty-color-primary: oklch(0.86 0.15 95);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--ty-surface-canvas);
+  color: var(--ty-text);
+  font: 14px/1.55 var(--font-body);
+  -webkit-font-smoothing: antialiased;
+  transition: opacity 0.12s ease;             /* no-FOUC fade-in */
+}
+html:not(.ty-ready) body { opacity: 0; }      /* hidden until ty-* upgrade */
+h1, h2, h3 { display: flex; align-items: center; gap: 10px; margin: 0; }
+a { color: var(--ty-color-primary); text-decoration: none; }
+a:hover { text-decoration: underline; text-underline-offset: 3px; }
+code {
+  background: var(--ty-surface-elevated); padding: 2px 6px; border-radius: 4px;
+  font: 500 0.88em/1 var(--font-mono); color: var(--ty-color-primary);
+}
+
+/* ── surfaces + borders ─────────────────────────────────────────────── */
+.hero, .card, .note, .movies, .ratings, .detail-card, .cast-card,
+.actor-card, .counter, .movie-form {
+  background: var(--ty-surface-content); border: 1px solid var(--ty-border);
+}
+.picker-scroll { background: var(--ty-surface-elevated); border: 1px solid var(--ty-border); }
+.topbar { background: var(--ty-surface-content); border-bottom: 1px solid var(--ty-border); }
+.dialog-header { border-bottom: 1px solid var(--ty-border); }
+.dialog-footer, footer { border-top: 1px solid var(--ty-border); }
+.pager-btn { background: var(--ty-surface-content); border: 1px solid var(--ty-border); }
+.section-count { background: var(--ty-surface-elevated); border: 1px solid var(--ty-border); }
+.empty-panel { background: var(--ty-surface-content); border: 1px dashed var(--ty-border); }
+.detail-card-footer { background: var(--ty-surface-elevated); border-top: 1px solid var(--ty-border-soft); }
+.detail-score-inline { background: var(--ty-bg-primary-soft); border: 1px solid rgba(255, 184, 0, 0.22); color: var(--ty-color-primary); }
+.movie { border-bottom: 1px solid var(--ty-border-soft); }
+.rating { border-bottom: 1px solid var(--ty-border-soft); }
+.movie:last-child, .rating:last-child { border-bottom: 0; }
+
+/* Card hover lifts */
+.card, .cast-card, .actor-card { color: inherit; transition: transform 0.15s, border-color 0.15s, box-shadow 0.15s; }
+.card:hover { transform: translateY(-1px); text-decoration: none; }
+.cast-card:hover, .actor-card:hover { transform: translateY(-2px); border-color: var(--ty-bg-strong); box-shadow: 0 8px 20px -8px rgba(0, 0, 0, 0.45); text-decoration: none; }
+
+/* Movie-row left accent on hover */
+.movie-link { color: inherit; transition: background 0.15s; }
+.movie-link::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: transparent; transition: background 0.15s; }
+.movie-link:hover { background: var(--ty-surface-elevated); text-decoration: none; }
+.movie-link:hover::before { background: var(--ty-color-primary); }
+
+/* ── colours: text tokens ───────────────────────────────────────────── */
+.brand { color: var(--ty-text); }
+.brand:hover { text-decoration: none; }
+.nav-link { color: var(--ty-text-faint); transition: background 0.15s, color 0.15s; }
+.nav-link:hover { color: var(--ty-text); background: var(--ty-surface-elevated); text-decoration: none; }
+.nav-link[aria-current="page"] { color: var(--ty-color-primary); background: var(--ty-bg-primary-soft); font-weight: 600; }
+footer { color: var(--ty-text-faint); }
+
+.hero-text, .card-text, .note-list, .rating-rater-name, .form-label { color: var(--ty-text-soft); }
+.card-icon, .counter-icon, .detail-score-inline ty-icon, .form-required, .cast-count { color: var(--ty-color-primary); }
+.counter-icon { opacity: 0.55; }
+.movie-meta, .actor-card-meta, .rating-rater, .detail-score-divider, .detail-score-max,
+.detail-year-empty, .detail-rating-count ty-icon, .form-field-hint { color: var(--ty-text-faint); }
+.detail-meta-sep { color: var(--ty-bg-strong); }
+.detail-year-empty { font-style: italic; }
+.hint { color: var(--ty-text-soft); font-size: 0.86em; line-height: 1.55; }
+
+/* Mono-font labels (sizes live in Tailwind) */
+.movie-year, .rating-rater-name { color: var(--ty-text-soft); }
+.movie-year, .movie-stats-count, .rating-ts, .detail-year, .detail-rating-count,
+.detail-id-label, .detail-id-value, .detail-card-hint, .rate-form-label,
+.section-title, .section-count, .pager-status,
+.movies-search-count, .back-link { font-family: var(--font-mono); }
+.movie-stats-count, .rating-ts, .detail-id-label, .detail-card-hint,
+.pager-status, .movies-search-count, .back-link { color: var(--ty-text-faint); }
+.detail-year, .detail-rating-count, .detail-id-value, .rate-form-label { color: var(--ty-text-soft); }
+.back-link:hover { color: var(--ty-text-soft); text-decoration: none; }
+.section-title { color: var(--ty-text-faint); text-transform: uppercase; letter-spacing: 0.14em; font-weight: 600; }
+.section-count { color: var(--ty-text-soft); }
+.rate-form-label, .detail-id-label { text-transform: uppercase; letter-spacing: 0.12em; }
+.empty-panel { color: var(--ty-text-faint); font-style: italic; }
+.movies-search-clear { color: var(--ty-text-faint); }
+.movies-search-clear:hover { color: var(--ty-text); }
+.pager-btn { color: var(--ty-text); transition: border-color 0.15s, background 0.15s; }
+.pager-btn:hover { border-color: var(--ty-bg-strong); background: var(--ty-surface-floating); text-decoration: none; }
+.pager-btn.disabled { opacity: 0.4; pointer-events: none; }
+.detail-card { overflow: hidden; box-shadow: 0 4px 18px rgba(0, 0, 0, 0.2); }
+.detail-card-footer code { padding: 1px 5px; font-size: 0.92em; }
+.detail-id-value { background: var(--ty-surface-floating); }
+.counter .value { color: var(--ty-color-primary); font-size: 2rem; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; line-height: 1; }
+.cast-meta { color: var(--ty-text-faint); }
+
+/* ── avatars (round initial chips) ──────────────────────────────────── */
+.cast-avatar, .actor-card-avatar, .rating-avatar, .tag-av {
+  border-radius: 50%; align-items: center; justify-content: center;
+  font-family: var(--font-body); font-weight: 700; flex-shrink: 0;
+}
+.cast-avatar, .actor-card-avatar { display: flex; box-shadow: 0 4px 12px -6px rgba(0, 0, 0, 0.4); }
+.rating-avatar, .tag-av { display: inline-flex; }
+.cast-avatar { width: 72px; height: 72px; font-size: 22px; margin: 0 auto 12px; overflow: hidden; }
+.cast-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.actor-card-avatar { width: 64px; height: 64px; font-size: 20px; }
+.rating-avatar { width: 22px; height: 22px; font-size: 9.5px; }
+.tag-av { width: 24px; height: 24px; font-size: 9px; box-shadow: 0 1px 3px -1px rgba(0, 0, 0, 0.5); }
+
+/* Picker <ty-tag> theming via its custom-property API + tightened ::part */
+.actor-tag, .genre-tag { cursor: pointer; }
+.actor-tag { --tag-bg: var(--ty-surface-elevated); --tag-border-color: var(--ty-border); }
+.actor-tag:hover { --tag-bg: var(--ty-surface-floating); --tag-border-color: var(--ty-bg-strong); }
+/* Selected cast floats to the top of the flex picker (instant, client-side) so
+   picked actors stay visible with their avatars — no separate token box. */
+.actor-tag[selected] { order: -1; --tag-bg: var(--ty-bg-primary-soft); --tag-border-color: var(--ty-color-primary); --tag-color: var(--ty-color-primary); }
+.actor-tag::part(container) { padding: 3px 12px 3px 4px; gap: 8px; min-height: 32px; }
+/* One quiet gold for ratings — the only coloured tag among neutrals. */
+ty-tag[flavor="rating"] { --tag-bg: oklch(0.26 0.035 92); --tag-color: oklch(0.80 0.10 92); --tag-border-color: oklch(0.40 0.06 92); }
+
+/* ── build badge ────────────────────────────────────────────────────── */
+.build-badge {
+  display: inline-flex; align-items: center; gap: 7px; padding: 5px 10px; margin-right: 8px;
+  border: 1px solid #16a34a; background: rgba(74, 222, 128, 0.08); border-radius: 999px;
+  font: 500 10.5px/1 var(--font-mono); letter-spacing: 0.04em; color: #86efac; cursor: help;
+}
+.build-badge-dot, .ribbon-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  animation: ribbon-dot-pulse 1.6s ease-in-out infinite;
+}
+.build-badge-dot { background: #4ade80; box-shadow: 0 0 6px #4ade80; }
+.ribbon-dot { background: var(--ty-color-success); box-shadow: 0 0 6px var(--ty-color-success); }
+@keyframes ribbon-dot-pulse {
+  0%, 100% { box-shadow: 0 0 6px var(--ty-color-success), 0 0 0 0 rgba(74, 222, 128, 0.5); }
+  50% { box-shadow: 0 0 8px var(--ty-color-success), 0 0 0 5px rgba(74, 222, 128, 0); }
+}
+
+/* ── live-update flash on a rated row ───────────────────────────────── */
+.movie-stats.flash-a, .movie-stats.flash-b { animation: stats-flash 1100ms cubic-bezier(0.16, 1, 0.3, 1); }
+@keyframes stats-flash {
+  0% { background: rgba(255, 184, 0, 0.3); box-shadow: 0 0 18px -4px var(--ty-bg-primary-soft); }
+  60% { background: rgba(255, 184, 0, 0.08); box-shadow: 0 0 0 0 transparent; }
+  100% { background: transparent; box-shadow: none; }
+}
+
+/* ── debug ribbon (event console; fixed dev widget) ─────────────────── */
+.debug-ribbon {
+  position: fixed; right: 20px; bottom: 20px; width: 460px; max-height: 55vh;
+  display: flex; flex-direction: column; background: rgba(10, 12, 15, 0.96);
+  border: 1px solid var(--ty-border); border-radius: 8px; font-family: var(--font-mono);
+  font-size: 11.5px; z-index: 9999; box-shadow: 0 20px 60px -10px rgba(0, 0, 0, 0.6); overflow: hidden;
+}
+.ribbon-header { display: flex; justify-content: space-between; align-items: center; padding: 9px 13px; border-bottom: 1px solid var(--ty-border); background: var(--ty-surface-content); }
+.ribbon-title { display: inline-flex; align-items: center; gap: 8px; font-weight: 700; font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ty-text); }
+.ribbon-meta { font-size: 10.5px; letter-spacing: 0.04em; color: var(--ty-text-faint); }
+.ribbon-log { margin: 0; padding: 6px 0; overflow-y: auto; display: flex; flex-direction: column-reverse; color: var(--ty-text); flex: 1; scrollbar-width: thin; scrollbar-color: var(--ty-surface-floating) transparent; }
+.ribbon-log::-webkit-scrollbar { width: 6px; }
+.ribbon-log::-webkit-scrollbar-thumb { background: var(--ty-surface-floating); border-radius: 3px; }
+.ev-row { display: grid; grid-template-columns: 72px 120px 1fr; gap: 10px; padding: 3px 13px; border-left: 2px solid transparent; font: 400 11px/1.4 var(--font-mono); transition: background 0.15s; animation: ev-row-in 220ms ease-out; }
+.ev-row:hover { background: rgba(255, 255, 255, 0.02); }
+.ev-time { color: var(--ty-text-faint); font-variant-numeric: tabular-nums; font-size: 10.5px; white-space: nowrap; }
+.ev-type { color: var(--ty-text); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ev-detail { color: var(--ty-text-soft); font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ev-add { border-left-color: var(--ty-color-success); } .ev-add .ev-type { color: var(--ty-color-success); }
+.ev-remove { border-left-color: var(--ty-color-danger); } .ev-remove .ev-type { color: var(--ty-color-danger); }
+.ev-change { border-left-color: var(--ty-color-warning); } .ev-change .ev-type { color: var(--ty-color-warning); }
+.ev-info { border-left-color: var(--ty-color-secondary); } .ev-info .ev-type { color: var(--ty-color-secondary); }
+.ev-warn { border-left-color: var(--ty-color-danger-bold); background: rgba(239, 68, 68, 0.06); } .ev-warn .ev-type { color: var(--ty-color-danger-bold); }
+@keyframes ev-row-in { 0% { opacity: 0; transform: translateX(6px); } 100% { opacity: 1; transform: translateX(0); } }
+
+@media (max-width: 860px) {
+  .debug-ribbon { width: calc(100vw - 24px); right: 12px; bottom: 12px; max-height: 40vh; }
+}

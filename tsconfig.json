@@ -1,0 +1,14 @@
+{
+  "//": "Type-conformance gate for the hand-written core library. Checks test/types.test-d.ts against src/index.d.ts so the parallel .js/.d.ts can't silently drift. Run: npm run typecheck.",
+  "compilerOptions": {
+    "target": "es2022",
+    "lib": ["es2023"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": []
+  },
+  "include": ["test/types.test-d.ts"]
+}

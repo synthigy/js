@@ -1,0 +1,27 @@
+{
+  "name": "datastar-movies",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Live Movies demo — Datastar BFF using @synthigy/sdk (watch / watchQuery / watchSqlTemplate). OIDC code-flow login. Zero browser-side SDK.",
+  "main": "serve.ts",
+  "scripts": {
+    "prepare": "npm run codegen",
+    "start": "node --watch-path=./views --watch-path=./lib --watch serve.ts",
+    "pretest": "npm run typecheck",
+    "test": "node --test tests/flow.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "codegen": "node ../../codegen/codegen.mjs synthigy/ generated/",
+    "codegen:pull": "node ../../codegen/codegen.mjs --pull synthigy/ generated/"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "tyrell-components": "1.0.0-TC31"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^5.6"
+  }
+}

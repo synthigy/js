@@ -1,0 +1,63 @@
+{
+  "name": "@synthigy/sdk",
+  "version": "0.1.0",
+  "description": "Zero-dependency client for Synthigy's /data endpoint",
+  "author": "Robert Geršak",
+  "license": "MIT",
+  "homepage": "https://github.com/synthigy/synthigy",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/synthigy/js.git"
+  },
+  "bugs": {
+    "url": "https://github.com/synthigy/js/issues"
+  },
+  "type": "module",
+  "main": "src/index.js",
+  "types": "src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "synthigy-gen": "./codegen/codegen.mjs"
+  },
+  "files": [
+    "src/",
+    "codegen/codegen.mjs",
+    "codegen/lib.mjs",
+    "codegen/pull.mjs"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "pretest": "npm run typecheck",
+    "test": "node --test 'test/*.test.js'",
+    "pretest:live": "npm run typecheck",
+    "test:live": "node --test test/integration.test.js",
+    "codegen": "node codegen/codegen.mjs"
+  },
+  "keywords": [
+    "synthigy",
+    "sdk",
+    "dataset",
+    "iam",
+    "crud",
+    "client",
+    "sse",
+    "realtime",
+    "xsql"
+  ],
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}
