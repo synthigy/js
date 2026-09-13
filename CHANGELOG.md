@@ -3,7 +3,15 @@
 All notable changes to `@synthigy/sdk`. Follows [semver](https://semver.org).
 Pre-1.0: breaking changes can land on minor bumps.
 
-## 0.1.0 — unreleased
+## 0.1.1
+
+### Fixed
+- `synthigy-gen` crashed on install with `ERR_MODULE_NOT_FOUND: typescript` —
+  the codegen imported the compiler as if it were bundled. `typescript` is now
+  an optional peer dependency, resolved from your project; the CLI says so
+  plainly when it is missing. The runtime client still has zero dependencies.
+
+## 0.1.0
 
 First public release.
 

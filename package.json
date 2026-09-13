@@ -1,6 +1,6 @@
 {
   "name": "@synthigy/sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Zero-dependency client for Synthigy's /data endpoint",
   "author": "Robert Geršak",
   "license": "MIT",
@@ -50,6 +50,14 @@
     "realtime",
     "xsql"
   ],
+  "peerDependencies": {
+    "typescript": ">=5"
+  },
+  "peerDependenciesMeta": {
+    "typescript": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "typescript": "^6.0.3"
   },

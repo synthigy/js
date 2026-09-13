@@ -66,7 +66,7 @@ for await (const ev of w.events) {
   IAM / RBAC / row-level security enforced *server-side*. Tokens never have to
   reach the browser. → [AUTH.md](./docs/AUTH.md)
 
-- **Typed from your model.** `synthigy-gen` compiles your ERD + `.xsql` files
+- **Typed from your model.** `synthigy-gen` (needs `typescript` in your project) compiles your ERD + `.xsql` files
   into typed methods whose result types follow the selection — a typo'd entity
   or an unselected field is a compile error. → [codegen](./docs/WATCH.md#codegen)
 

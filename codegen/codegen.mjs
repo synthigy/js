@@ -10,8 +10,20 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import ts from 'typescript'
+import { createRequire } from 'node:module'
 import { TS, tsScalar, pascal, camel } from './lib.mjs'
+
+// typescript is an optional peer: the runtime client has no dependencies and
+// must stay that way, but generating .ts files needs the compiler — resolved
+// from the consumer's project, where a TypeScript codebase already has it.
+let ts
+try {
+  ts = createRequire(import.meta.url)('typescript')
+} catch {
+  console.error('synthigy-gen: `typescript` is required to generate code and was not found.\n' +
+                '  npm install -D typescript')
+  process.exit(1)
+}
 
 const here = path.dirname(new URL(import.meta.url).pathname)
 
