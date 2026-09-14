@@ -40,7 +40,7 @@ Open `/movies` in two tabs. Rate/edit in one; the other updates within ~100ms.
 1. **Synthigy server** with `:synthigy/server` up (needs IAM + subscriptions).
    Default endpoint `http://localhost:7887`.
 2. **JWT keypair seeded** (one-time, REPL): `(require '[synthigy.iam.encryption :as enc]) (enc/rotate-keypair)`
-3. **Movies dataset deployed** (see `examples/movies/datasets/`).
+3. **Movies dataset deployed** (see `examples/datasets/movies/`).
 4. **OAuth client registered** (authorization_code grant) via REPL:
    ```clojure
    (require '[synthigy.iam :as iam])
@@ -62,6 +62,7 @@ Open `/movies` in two tabs. Rate/edit in one; the other updates within ~100ms.
 ```bash
 direnv allow            # loads .envrc: CLIENT_ID/SECRET, PORT, ENDPOINT (see .envrc)
 npm install             # tyrell-components
+npm run codegen:pull    # pull schema -> compile xsql -> generated/  (needs the server)
 npm start               # = node --watch serve.ts  (hot-reloads on save)
 ```
 

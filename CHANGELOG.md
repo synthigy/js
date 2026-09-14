@@ -3,6 +3,25 @@
 All notable changes to `@synthigy/sdk`. Follows [semver](https://semver.org).
 Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.1.2
+
+### Fixed
+- **Generated code imported the SDK by relative path.** `ops.ts` was emitted
+  with a path computed from the codegen directory, which outside this repo
+  becomes `../node_modules/@synthigy/sdk/src/index.js` — correct for exactly
+  one install layout. When codegen runs from an installed copy it now emits the
+  bare specifier `@synthigy/sdk`.
+- **The type-check gate could not find `tsc` in a normal install.** It looked
+  under `@synthigy/sdk/node_modules/.bin`, a path that only exists when the
+  compiler is nested rather than hoisted, and failed with an empty message.
+  `tsc` is now resolved the same way the `typescript` module already was, and
+  when no compiler is present the gate is skipped with a warning instead of
+  failing codegen.
+- **`--ignoreConfig` was passed to every compiler version.** The flag needs
+  TypeScript 6; on 5.x it is itself an error (TS5023), so every consumer on a
+  5.x toolchain saw codegen fail. It is now sent only to compilers that
+  accept it.
+
 ## 0.1.1
 
 ### Fixed

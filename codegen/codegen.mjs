@@ -251,7 +251,13 @@ fs.writeFileSync(irPath, JSON.stringify(ir, null, 2) + '\n')
 // Identity (namespace / name), @watch, and sql-template @returns results all come
 // from the IR now — the canonical XSQL parser owns them. No XSQL re-parsing here.
 const schema  = JSON.parse(fs.readFileSync(schemaPath, 'utf8'))
-const sdkSrc  = path.relative(outDir, path.join(here, '..', 'src')) + '/index.js'
+// Installed from npm -> import the package by name; a relative path out of
+// node_modules is correct only for one install layout. Inside this repo the
+// relative path is still what works, since there is no package to resolve.
+const sdkRoot = path.join(here, '..')
+const sdkSrc  = sdkRoot.includes(`${path.sep}node_modules${path.sep}`)
+  ? '@synthigy/sdk'
+  : path.relative(outDir, path.join(sdkRoot, 'src')) + '/index.js'
 const ent     = (n) => schema.entities[n] ?? {}
 const visited = new Set()
 
@@ -490,20 +496,42 @@ fs.writeFileSync(path.join(outDir, 'ops.ts'),    OPS_HDR_COMMENT + formatTs(OPS_
 // type-check — never ship broken/stale output silently (the old emit-and-swallow
 // shipped a stale ops.js once). No .js emitted: consumers import the .ts source
 // (Node 23+ type-stripping / a bundler); the type-only `./schema.js` import erases
-// at runtime. `--ignoreConfig` so a consumer tsconfig can't trip TS5112.
-const tscBin = path.join(here, '..', 'node_modules', '.bin', 'tsc')
-try {
-  execFileSync(tscBin, [
-    '--ignoreConfig',
-    '--module', 'nodenext', '--moduleResolution', 'nodenext',
-    '--target', 'es2022', '--strict', '--skipLibCheck', '--noEmit',
-    path.join(outDir, 'ops.ts'),
-    path.join(outDir, 'schema.ts'),
-  ], { stdio: 'pipe' })
-} catch (e) {
-  process.stderr.write('codegen: generated TS failed to type-check (not shipped):\n')
-  process.stderr.write((e.stdout ?? e.stderr ?? '').toString())
-  process.exit(1)
+// at runtime.
+// Locate tsc through the SAME resolution that found the `typescript` module
+// above, so a hoisted install — the normal consumer layout — is found. A path
+// built from `here` only exists when typescript is nested under this package.
+const tscBin = (() => {
+  try {
+    const lib = createRequire(import.meta.url).resolve('typescript')
+    const bin = path.join(path.dirname(lib), '..', 'bin', 'tsc')
+    if (fs.existsSync(bin)) return bin
+  } catch {}
+  for (const c of [path.join(here, '..', 'node_modules', '.bin', 'tsc'),
+                   path.join(process.cwd(), 'node_modules', '.bin', 'tsc')]) {
+    if (fs.existsSync(c)) return c
+  }
+  return null
+})()
+
+// `--ignoreConfig` needs TypeScript 6. On 5.x the flag is itself an error, and
+// naming files explicitly already makes tsc skip tsconfig.json, so it is left off.
+const tscMajor = Number.parseInt(ts.version ?? '0', 10) || 0
+if (tscBin) {
+  try {
+    execFileSync(tscBin, [
+      ...(tscMajor >= 6 ? ['--ignoreConfig'] : []),
+      '--module', 'nodenext', '--moduleResolution', 'nodenext',
+      '--target', 'es2022', '--strict', '--skipLibCheck', '--noEmit',
+      path.join(outDir, 'ops.ts'),
+      path.join(outDir, 'schema.ts'),
+    ], { stdio: 'pipe' })
+  } catch (e) {
+    process.stderr.write('codegen: generated TS failed to type-check (not shipped):\n')
+    process.stderr.write((e.stdout ?? e.stderr ?? '').toString())
+    process.exit(1)
+  }
+} else {
+  process.stderr.write('codegen: tsc not found — skipping the type-check gate.\n')
 }
 const flagSummary = [flags.keys !== 'snake' && `keys=${flags.keys}`, !flags.writes && 'no-writes'].filter(Boolean).join(' ')
 const opCount = ir.operations.filter(o => !o.batch).length
