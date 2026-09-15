@@ -2541,3 +2541,30 @@ describe('safe watch teardown', () => {
     w.close()
   })
 })
+
+describe('deploy / destroy', () => {
+  beforeEach(() => mockFetch.mock.resetCalls())
+  const client = () => createClient({ endpoint: 'http://localhost', token: 't' })
+
+  it('deploy posts the export contents verbatim as `data`, no entity', async () => {
+    mockFetch.mock.mockImplementation(async () =>
+      mockResponse(200, { results: [{ ok: true, data: { deployed: true, version: '0.3', dataset: 'ds-1' } }] }))
+    const ack = await client().deploy('{"~:xid":"v-1"}')
+    assert.deepEqual(ack, { deployed: true, version: '0.3', dataset: 'ds-1' })
+    const body = JSON.parse(mockFetch.mock.calls[0].arguments[1].body)
+    assert.deepEqual(body.operations, [{ op: 'deploy', data: '{"~:xid":"v-1"}' }])
+  })
+
+  it('destroy is delete on the dataset meta-entity by xid', async () => {
+    mockFetch.mock.mockImplementation(async () =>
+      mockResponse(200, { results: [{ ok: true, data: true }] }))
+    assert.equal(await client().destroy('ds-1'), true)
+    const body = JSON.parse(mockFetch.mock.calls[0].arguments[1].body)
+    assert.deepEqual(body.operations, [{ op: 'delete', entity: 'dataset', data: { xid: 'ds-1' } }])
+  })
+
+  it('op builders match the client methods', () => {
+    assert.deepEqual(op.deploy('x'), { op: 'deploy', data: 'x' })
+    assert.deepEqual(op.destroy('ds-1'), { op: 'delete', entity: 'dataset', data: { xid: 'ds-1' } })
+  })
+})

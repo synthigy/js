@@ -733,6 +733,15 @@ const RETRYABLE_CATEGORIES = new Set(['network', 'rate_limit', 'internal'])
  *   - .requestId— request ID for cross-correlation with server logs
  *   - .status   — HTTP status code (for transport-level errors)
  */
+/**
+ * The platform API this SDK is a client of. `/data`, `/schema`, `/history`,
+ * `/logs` and subscriptions all require a token bound to it. It identifies the
+ * API, never a deployment, so it is the same string on localhost and in
+ * production — which is exactly why it is a constant here rather than
+ * something every caller configures.
+ */
+export const PLATFORM_AUDIENCE = 'https://synthigy.com'
+
 export class SynthigyError extends Error {
   constructor(message, code, details, extras) {
     super(message)
@@ -870,12 +879,16 @@ class SynthigyClient {
     // [sub, client_id] isn't torn down between watches. Replaces the
     // earlier "dummy keepalive watch" workaround.
     this._keepAlive = config.keepAlive === true
-    // The platform's audience model is opt-in: a client_credentials mint
-    // naming no audience resolves to the identity-only OIDC audience, which
-    // /data rejects. Bound once here, applied to every mint this client makes.
+    // A client_credentials mint naming no audience resolves to the
+    // identity-only OIDC audience, which /data rejects. This SDK is the client
+    // for the platform API, so PLATFORM_AUDIENCE is what it asks for — there
+    // is nothing for a caller to configure, and nowhere to look the value up
+    // if there were: the server does not advertise it in discovery. Minting a
+    // token for some OTHER API is a per-call argument on token(), not a
+    // property of the client. The env var stays only as an escape hatch.
     this._defaultAudience = config.audience
       ?? (typeof process !== 'undefined' ? process.env?.SYNTHIGY_AUDIENCE : undefined)
-      ?? undefined
+      ?? PLATFORM_AUDIENCE
 
     if (config.token !== undefined && config.token !== null) {
       // Static token mode — empty string allowed for unauth / dev servers.
@@ -1864,6 +1877,34 @@ class SynthigyClient {
   }
 
   /**
+   * Deploy a dataset version from a modeler export. Pass the export file's
+   * contents verbatim — the server decodes it. Requires `dataset:deploy`.
+   *
+   * @param {string} exportContents - Contents of a `<Dataset>@<version>.json` export
+   * @param {Object} [opts] - Options ({ actingAs })
+   * @returns {Promise<{deployed: boolean, version: string, dataset: string}>}
+   */
+  async deploy(exportContents, opts) {
+    const [result] = await this.exec([{ op: 'deploy', data: exportContents }], opts)
+    if (!result.ok) throw _errorFromServer(result.error, undefined, result._requestId)
+    return result.data
+  }
+
+  /**
+   * Destroy a dataset: every version, every table, every row. Requires
+   * `dataset:delete`. Idempotent — a dataset that is already gone is not an error.
+   *
+   * @param {string} datasetXid - The dataset xid (`deploy()` returns it)
+   * @param {Object} [opts] - Options ({ actingAs })
+   * @returns {Promise<boolean>}
+   */
+  async destroy(datasetXid, opts) {
+    const [result] = await this.exec([{ op: 'delete', entity: 'dataset', data: { xid: datasetXid } }], opts)
+    if (!result.ok) throw _errorFromServer(result.error, undefined, result._requestId)
+    return result.data
+  }
+
+  /**
    * Fetch the runtime ERD model — the deployed model augmented with:
    *   - `xid` / `euuid` identity attrs on every entity
    *   - audit attrs (created-on / modified-on / created-by / modified-by)
@@ -2387,6 +2428,8 @@ export const op = {
   sqlTemplate: (template, params)        => ({ op: 'sql-template', template, params: params || [] }),
   deployedModel: () => ({ op: 'deployed-model' }),
   runtimeModel: () => ({ op: 'runtime-model' }),
+  deploy:       (exportContents)         => ({ op: 'deploy', data: exportContents }),
+  destroy:      (datasetXid)             => ({ op: 'delete', entity: 'dataset', data: { xid: datasetXid } }),
 }
 
 // ============================================================================
@@ -2512,6 +2555,8 @@ export const schema        = (...a) => _dflt().schema(...a)
 export const lint          = (...a) => _dflt().lint(...a)
 export const onboard       = (...a) => _dflt().onboard(...a)
 export const onboardComplete = (...a) => _dflt().onboardComplete(...a)
+export const deploy        = (...a) => _dflt().deploy(...a)
+export const destroy       = (...a) => _dflt().destroy(...a)
 export const deployedModel = (...a) => _dflt().deployedModel(...a)
 export const runtimeModel  = (...a) => _dflt().runtimeModel(...a)
 export const token         = (...a) => _dflt().token(...a)

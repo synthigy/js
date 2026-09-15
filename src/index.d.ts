@@ -1,3 +1,6 @@
+/** The platform API this SDK is a client of; the default audience for every mint. */
+export const PLATFORM_AUDIENCE: "https://synthigy.com"
+
 // ============================================================================
 // Selection
 // ============================================================================
@@ -77,6 +80,13 @@ export interface TreeExecOpts extends ExecOpts {
   raw?: boolean
   /** Key under which children are nested (default: "_children"). */
   childrenKey?: string
+}
+
+/** What `deploy()` acks with — `dataset` is the xid `destroy()` takes. */
+export interface DeployAck {
+  deployed: boolean
+  version: string
+  dataset: string
 }
 
 export type OperationResult<T = unknown> =
@@ -609,6 +619,19 @@ export class SynthigyClient {
   deployedModel(opts?: ExecOpts): Promise<Record<string, unknown>>
 
   /**
+   * Deploy a dataset version from a modeler export — pass the export file's
+   * contents verbatim, the server decodes it. Requires `dataset:deploy`.
+   * The ack carries the dataset xid `destroy()` takes.
+   */
+  deploy(exportContents: string, opts?: ExecOpts): Promise<DeployAck>
+
+  /**
+   * Destroy a dataset — every version, table and row. Requires
+   * `dataset:delete`. Idempotent.
+   */
+  destroy(datasetXid: string, opts?: ExecOpts): Promise<boolean>
+
+  /**
    * Fetch the runtime (enhanced) ERD model via `op: "runtime-model"` —
    * the model as the running system actually emits it, with audit
    * timestamps, computed defaults, and reference-typed attrs surfaced
@@ -1014,6 +1037,8 @@ export const op: {
   sqlTemplate(template: string, params?: Record<string, unknown> | unknown[], opts?: { cached?: boolean }): Operation
   deployedModel(): Operation
   runtimeModel(): Operation
+  deploy(exportContents: string): Operation
+  destroy(datasetXid: string): Operation
 }
 
 // ============================================================================
@@ -1087,6 +1112,8 @@ export { _delete as delete }
 
 export const schema: SynthigyClient['schema']
 export const lint: SynthigyClient['lint']
+export const deploy: SynthigyClient['deploy']
+export const destroy: SynthigyClient['destroy']
 export const deployedModel: SynthigyClient['deployedModel']
 export const runtimeModel: SynthigyClient['runtimeModel']
 export const token: SynthigyClient['token']

@@ -5,7 +5,49 @@ Pre-1.0: breaking changes can land on minor bumps.
 
 ## 0.1.2
 
+### Added
+- **`deploy(exportContents)` and `destroy(datasetXid)`** — client methods,
+  `op.deploy` / `op.destroy` builders, the `DeployAck` type, and the
+  module-level facade exports. A model export goes over the wire verbatim as
+  a string and the server decodes it, so no client needs a transit codec:
+  `deploy` posts the export file's bytes, and `destroy` is `delete` on the
+  `dataset` meta-entity. The deploy ack carries the dataset xid that
+  `destroy` takes, so a caller holding nothing but the export can still tear
+  down what it deployed. Both are scope-gated server-side (`dataset:deploy` /
+  `dataset:delete`, which only the Dataset Developer role carries), so the
+  SDK adds no permission surface of its own.
+
+### Changed
+- **The platform audience is now the default; nobody configures it.** A
+  `client_credentials` mint naming no audience resolves to the identity-only
+  OIDC audience, which `/data`, `/schema`, `/history`, `/logs` and
+  subscriptions all reject — so every user had to set `SYNTHIGY_AUDIENCE` to a
+  constant they could not look up, since the server does not advertise it in
+  discovery. The failure was a bare 401 that said nothing about audiences.
+  This SDK is the client for the platform API, so that is what it now mints
+  for. Minting for a different API stays a per-call argument. The environment
+  variable remains as an escape hatch.
+
 ### Fixed
+- **A failed `describe` crashed codegen with `ir.operations is not iterable`,
+  throwing away the server's diagnostic.** `/data` answers a failed describe
+  with HTTP 200 and `{ok: false, error}` in the result, so the generator read
+  `.operations` off an error object and died on a TypeError — while the server
+  had said, precisely, `describe: 'timestamp' is not an attribute on
+  'user_rating'`. The `ok: false` result is now surfaced as that message, and a
+  response carrying no operations array fails with what it did carry.
+- **Codegen could not authenticate against a server that requires an audience.**
+  Neither the schema pull nor the describe call read `SYNTHIGY_AUDIENCE`, so on
+  such a server the token minted fine and was then refused, surfacing as a bare
+  401 on `/schema` that said nothing about audiences. Both paths now pass it
+  when set. A static `SYNTHIGY_TOKEN` is unaffected, since its audience is
+  already baked in. The PHP generator has always read this variable; Go,
+  Python and Clojure still do not.
+- **`@batch` was skipped silently.** The generator's own comment says to skip
+  loudly and never silently, and the batch branch did the opposite: an author
+  declaring a batch got nothing back and no diagnostic. It now says what it
+  skipped and what to do instead. Emitting batch functions, which the Python
+  and PHP generators do, is still not implemented here.
 - **Generated code imported the SDK by relative path.** `ops.ts` was emitted
   with a path computed from the codegen directory, which outside this repo
   becomes `../node_modules/@synthigy/sdk/src/index.js` — correct for exactly

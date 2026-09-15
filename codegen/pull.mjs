@@ -26,11 +26,17 @@ if (!endpoint) {
   process.exit(1)
 }
 
-const { SYNTHIGY_TOKEN, SYNTHIGY_CLIENT_ID, SYNTHIGY_CLIENT_SECRET } = process.env
+const { SYNTHIGY_TOKEN, SYNTHIGY_CLIENT_ID, SYNTHIGY_CLIENT_SECRET,
+        SYNTHIGY_AUDIENCE } = process.env
 const config = { endpoint }
 if (SYNTHIGY_CLIENT_ID && SYNTHIGY_CLIENT_SECRET) {
   config.clientId = SYNTHIGY_CLIENT_ID
   config.clientSecret = SYNTHIGY_CLIENT_SECRET
+  // A server can require an explicit client_credentials audience for /data and
+  // /schema. Without it the mint still succeeds and the token is then refused,
+  // so the symptom is a 401 on schema rather than anything about auth config.
+  // A static SYNTHIGY_TOKEN already has its audience baked in.
+  if (SYNTHIGY_AUDIENCE) config.audience = SYNTHIGY_AUDIENCE
 } else {
   config.token = SYNTHIGY_TOKEN ?? '' // '' = authless (bare server)
 }

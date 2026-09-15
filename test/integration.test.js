@@ -659,3 +659,33 @@ describe('onboard (live)', { skip: skipOnboard }, () => {
     assert.equal(result.user.xid, created.xid)
   })
 })
+
+// ── Deploy / destroy (live) ───────────────────────────────────────────────────
+//
+// Needs a client holding Dataset Developer (`dataset:deploy` + `dataset:delete`)
+// and a modeler export to deploy. The export's bytes go over the wire untouched.
+
+const DEPLOY_EXPORT = process.env.SYNTHIGY_DEPLOY_EXPORT
+
+const skipDeploy = (skip || !DEPLOY_EXPORT)
+  ? 'Set SYNTHIGY_DEPLOY_EXPORT=<path to a Dataset@version.json export> (client must hold Dataset Developer)'
+  : false
+
+describe('deploy / destroy (live)', { skip: skipDeploy }, () => {
+  it('deploys the export, acks the dataset xid, destroys it, and is idempotent', async () => {
+    const { readFile } = await import('node:fs/promises')
+    const client = createClient({ endpoint: ENDPOINT, clientId: CLIENT_ID, clientSecret: CLIENT_SECRET })
+    const contents = await readFile(DEPLOY_EXPORT, 'utf8')
+
+    const ack = await client.deploy(contents)
+    assert.equal(ack.deployed, true)
+    assert.equal(typeof ack.version, 'string')
+    assert.equal(typeof ack.dataset, 'string')
+
+    const schema = await client.schema()
+    assert.ok(Object.keys(schema).length > 0, 'deployed entities show in the schema')
+
+    assert.equal(await client.destroy(ack.dataset), true)
+    assert.equal(await client.destroy(ack.dataset), true, 'destroy is idempotent')
+  })
+})

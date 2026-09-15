@@ -79,8 +79,7 @@ for await (const ev of w.events) {
 | [WATCH.md](./docs/WATCH.md) | `watch` / `watchQuery` / `watchSqlTemplate` / `observe`, lifecycle, and codegen |
 | [AUTH.md](./docs/AUTH.md) | OAuth client registration, `actingAs`, BFF / SPA / native patterns |
 | [CHANGELOG.md](./CHANGELOG.md) | Version history |
-| [examples/datastar-movies/](./examples/datastar-movies/) | End-to-end BFF exercising every primitive |
-| [examples/movies-live.mjs](./examples/movies-live.mjs) | Minimal live-watch demo |
+| [synthigy/examples: movies/js](https://github.com/synthigy/examples/tree/main/movies/js) | End-to-end Datastar BFF against the published package |
 | [src/index.d.ts](./src/index.d.ts) | Full type definitions |
 
 ## Tests
