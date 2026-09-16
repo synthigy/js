@@ -36,6 +36,18 @@ jobs:
           tag="${GITHUB_REF_NAME#v}"
           pkg=$(node -p "require('./package.json').version")
           [ "$tag" = "$pkg" ] || { echo "tag $tag != package.json $pkg"; exit 1; }
-      - run: npm publish
+      # npm never overwrites a version. A tag whose package is already there
+      # (published by hand, or a re-run) must be a no-op, not a red run.
+      - name: Already on npm?
+        id: exists
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          if npm view "@synthigy/sdk@$v" version >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"; echo "@synthigy/sdk $v already published - skipping publish"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.exists.outputs.skip != 'true'
+        run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
