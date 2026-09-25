@@ -294,11 +294,16 @@ export interface Schema {
  *
  * Client-side (no server round trip):
  *   NO_TOKEN — no token source configured; see ClientConfig.
+ *   NO_LOGIN_STORE — createClient({ loginStore }) was never given one.
+ *   LOGIN_REQUIRES_CONFIDENTIAL_CLIENT — login needs clientId + clientSecret.
+ *   LOGIN_STATE_UNKNOWN, LOGIN_NONCE_MISMATCH, LOGIN_EXCHANGE_FAILED — see client.login.
  */
 export type SynthigyErrorCode =
   | 'UNAUTHORIZED' | 'CLIENT_NOT_FOUND' | 'CLIENT_INACTIVE'
   | 'PUBLIC_CLIENT_FORBIDDEN' | 'NOT_TRUSTED' | 'USER_NOT_FOUND'
   | 'FORBIDDEN' | 'NO_TOKEN'
+  | 'NO_LOGIN_STORE' | 'LOGIN_REQUIRES_CONFIDENTIAL_CLIENT'
+  | 'LOGIN_STATE_UNKNOWN' | 'LOGIN_NONCE_MISMATCH' | 'LOGIN_EXCHANGE_FAILED'
   | 'INVALID_BODY' | 'NO_OPERATIONS' | 'BAD_OP' | 'MISSING_ENTITY'
   | 'BAD_ARGS_SHAPE'
   | 'UNKNOWN_OP' | 'UNKNOWN_ENTITY' | 'UNKNOWN_ATTRIBUTE' | 'UNKNOWN_OPERATOR'
@@ -321,7 +326,8 @@ export class SynthigyError extends Error {
 // ============================================================================
 
 export interface ClientConfig {
-  endpoint: string
+  /** Synthigy base URL. Defaults to `$SYNTHIGY_ENDPOINT` (set by `synthigy exec`). */
+  endpoint?: string
   /** OAuth client ID — required with clientSecret for client credentials */
   clientId?: string
   clientSecret?: string
@@ -332,6 +338,12 @@ export interface ClientConfig {
    * with no source at all it throws SynthigyError{code: 'NO_TOKEN'}.
    */
   token?: string
+  /**
+   * Caller-owned token source, checked before every other option. `clear()`
+   * is called on a 401 before the single retry; `createBrowserLogin()`'s
+   * `tokenProvider()` renews there.
+   */
+  tokenProvider?: TokenProvider
   scope?: string
   /**
    * Default client_credentials audience, applied to every mint this client
@@ -368,6 +380,131 @@ export interface ClientConfig {
    * Pass `undici.fetch` with a shared `Agent` for pooled connections in Node.
    */
   fetch?: typeof globalThis.fetch
+  /**
+   * Where in-flight logins live between `login.start()` and the callback.
+   * Required to use `client.login` at all — without one, every call throws
+   * `NO_LOGIN_STORE` rather than silently keeping state in one process.
+   * `MemoryLoginStore` is the single-process dev option.
+   */
+  loginStore?: LoginStore
+}
+
+// ============================================================================
+// Login — OIDC authorization-code + PKCE
+// ============================================================================
+
+/** One login in flight: everything the callback needs to finish it. */
+export interface PendingLogin {
+  codeVerifier: string
+  nonce: string
+  returnTo: string
+  createdAt: number
+}
+
+/**
+ * The one piece of protocol state the SDK cannot hold for you.
+ *
+ * `take` is one-shot: it must return the login AND remove it, so a replayed
+ * callback finds nothing. Both methods may be sync or async.
+ */
+export interface TokenProvider {
+  getToken(audience?: string): string | null | Promise<string | null>
+  clear(): void
+}
+
+export interface BrowserLoginConfig {
+  endpoint: string
+  clientId: string
+  /** The page that finishes the login (calls `complete()`), registered on the client. */
+  redirectUri: string
+  /** Page the renewal iframe lands on; default `redirectUri`. It must call `silentCallback()` first. */
+  silentRedirectUri?: string
+  postLogoutRedirectUri?: string
+  /** Default 'openid profile'. */
+  scope?: string
+  audience?: string
+  /** Renew silently shortly before expiry (default true). */
+  automaticSilentRenew?: boolean
+  /** Merge /oauth/userinfo into `user` after each login and renewal (default false) — the profile (name, email) lives there. */
+  loadUserInfo?: boolean
+  /** Seconds before expiry that renewal starts (default 60). */
+  expiringSeconds?: number
+  silentTimeoutMs?: number
+  fetch?: typeof globalThis.fetch
+  /** Where the in-flight login waits for the callback (default sessionStorage). */
+  storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
+}
+
+export type BrowserLoginEvent =
+  'userLoaded' | 'userUnloaded' | 'accessTokenExpiring' | 'accessTokenExpired' | 'silentRenewError'
+
+export interface BrowserLogin {
+  /** id_token claims of the logged-in user (`sub`, `xid`, …), or null. */
+  readonly user: Record<string, unknown> | null
+  readonly token: string | null
+  on(event: BrowserLoginEvent, listener: (payload?: unknown) => void): () => void
+  isCallback(): boolean
+  /** Redirect to the login page; `prompt: 'none'` returns at once when a session is alive. */
+  start(opts?: { prompt?: 'none' | 'login'; returnTo?: string }): Promise<void>
+  /** Finish the login the current URL returns from, or null when it carries none. */
+  complete(): Promise<{ user: Record<string, unknown>; returnTo: string } | null>
+  /** The user cancelled on the IdP: drop the pending login. */
+  cancel(): { returnTo: string } | null
+  renew(): Promise<Record<string, unknown>>
+  removeUser(): void
+  logout(): void
+  tokenProvider(): TokenProvider
+}
+
+/** Browser login as a public client: PKCE, silent renew, tokens in memory. */
+export function createBrowserLogin(config: BrowserLoginConfig): BrowserLogin
+
+/** Call first on the silent-redirect page; true when this window was a renewal iframe and answered it. */
+export function silentCallback(): boolean
+
+export interface LoginStore {
+  put(state: string, login: PendingLogin): void | Promise<void>
+  take(state: string): PendingLogin | null | Promise<PendingLogin | null>
+}
+
+/** In-memory `LoginStore`. Single process only — see the class docstring. */
+export class MemoryLoginStore implements LoginStore {
+  constructor(opts?: { ttlMs?: number })
+  put(state: string, login: PendingLogin): void
+  take(state: string): PendingLogin | null
+}
+
+export interface LoginStartOpts {
+  /** URL on YOUR server the IdP redirects back to; must be registered on the client. */
+  redirectUri: string
+  /** Where to send the visitor once login finishes. Default `'/'`. */
+  returnTo?: string
+  /** Default `'openid'` — the scope that names the user. */
+  scope?: string
+  /** Browser-reachable engine URL, when it differs from the server-side one. */
+  publicEndpoint?: string
+}
+
+export interface LoginCompleteOpts {
+  code: string
+  state: string
+  redirectUri: string
+}
+
+export interface LoginTokens {
+  access_token: string
+  id_token?: string
+  refresh_token?: string
+  token_type?: string
+  scope?: string
+  expires_in?: number
+}
+
+export interface LoginResult {
+  /** Straight out of the id_token — no /data round-trip. */
+  user: { xid: string | null; name: string | null; scopes: string[] }
+  tokens: LoginTokens
+  returnTo: string
 }
 
 // ============================================================================
@@ -566,6 +703,19 @@ export class SynthigyClient {
     since(opts?: HistorySinceOpts): Promise<HistoryEvent[]>
   }
 
+  // ── Login — OIDC authorization-code + PKCE ───────────────────────────────
+
+  login: {
+    /** Begin a login; redirect the browser to the returned URL. */
+    start(opts: LoginStartOpts): Promise<{ url: string }>
+
+    /** Finish a login from the callback's `code` + `state`. */
+    complete(opts: LoginCompleteOpts): Promise<LoginResult>
+
+    /** Drop an in-flight login and recover its `returnTo`; null when unknown. */
+    cancel(state: string | null | undefined): Promise<{ returnTo: string } | null>
+  }
+
   /** Fetch the IAM-filtered model schema via `GET /schema`. Pass entity names to filter. */
   schema(entities?: string[]): Promise<Schema>
 
@@ -577,6 +727,17 @@ export class SynthigyClient {
     entity?: string
     op?: 'search' | 'get' | 'slice' | 'purge'
   }): Promise<LintDiagnostic[]>
+
+  /**
+   * Compile an XSQL source to the wire operation the engine would execute
+   * (`POST /compile`), without executing it. `params` bind exactly as on
+   * `query`, so the result IS what the engine receives — edit it and send
+   * it through `exec`.
+   */
+  compile(source: string, opts?: {
+    params?: Record<string, unknown>
+    op?: 'search' | 'get' | 'slice' | 'purge'
+  }): Promise<Operation>
 
   /**
    * Mint a one-time account-claim link via `POST /oauth/onboard`.
@@ -1027,14 +1188,16 @@ export function rel(selections: Selection, args?: Args, alias?: string): Relatio
 export const op: {
   search(entity: string, args: Args | undefined, selection: Selection): Operation
   get(entity: string, args: Record<string, unknown>, selection: Selection): Operation
-  sync(entity: string, data: Record<string, unknown>, returning?: boolean): Operation
-  stack(entity: string, data: Record<string, unknown>, returning?: boolean): Operation
+  sync(entity: string, data: Record<string, unknown> | Record<string, unknown>[], returning?: boolean): Operation
+  stack(entity: string, data: Record<string, unknown> | Record<string, unknown>[], returning?: boolean): Operation
   slice(entity: string, args: Record<string, unknown>, selection?: Selection): Operation
   delete(entity: string, data: Record<string, unknown>): Operation
   purge(entity: string, args: Args | undefined, selection?: Selection): Operation
   searchTree(entity: string, on: string, args: Args | undefined, selection: Selection): Operation
   getTree(entity: string, root: string, on: string, selection: Selection): Operation
   sqlTemplate(template: string, params?: Record<string, unknown> | unknown[], opts?: { cached?: boolean }): Operation
+  /** An XSQL read, for `exec` batches; `verb` names the op a bare body runs as (default `search`). */
+  query(xsql: string, params?: Record<string, unknown>, verb?: string): Operation
   deployedModel(): Operation
   runtimeModel(): Operation
   deploy(exportContents: string): Operation
@@ -1074,7 +1237,7 @@ export function composeForest<T extends Record<string, unknown>>(
 // Factory
 // ============================================================================
 
-export function createClient(config: ClientConfig): SynthigyClient
+export function createClient(config?: ClientConfig): SynthigyClient
 
 // ============================================================================
 // Single-client layer — connect once, call the bare verbs, no client threading.
@@ -1083,7 +1246,7 @@ export function createClient(config: ClientConfig): SynthigyClient
 // ============================================================================
 
 /** Install a module-wide default client (destroys any previous one). */
-export function connect(config: ClientConfig): SynthigyClient
+export function connect(config?: ClientConfig): SynthigyClient
 /** Destroy and uninstall the default client. No-op when not connected. */
 export function disconnect(): void
 /** The default client installed by `connect`, or null. */
@@ -1112,12 +1275,16 @@ export { _delete as delete }
 
 export const schema: SynthigyClient['schema']
 export const lint: SynthigyClient['lint']
+export const compile: SynthigyClient['compile']
+export const onboard: SynthigyClient['onboard']
+export const onboardComplete: SynthigyClient['onboardComplete']
 export const deploy: SynthigyClient['deploy']
 export const destroy: SynthigyClient['destroy']
 export const deployedModel: SynthigyClient['deployedModel']
 export const runtimeModel: SynthigyClient['runtimeModel']
 export const token: SynthigyClient['token']
 export function history(): SynthigyClient['history']
+export function login(): SynthigyClient['login']
 
 export const listen: SynthigyClient['listen']
 export const observe: SynthigyClient['observe']

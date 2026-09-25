@@ -7,8 +7,7 @@ import { fileURLToPath } from 'node:url'
 
 // Contract test for the supervised-stdio token source — spawns the SDK's
 // own process (via `node --input-type=module -e <script>`, ESM inline
-// eval) under a stub parent speaking `auth.token`, per
-// docs/plans/PLAN-EXEC-IDENTITY.md steps 3-4. The child writes its result
+// eval) under a stub parent speaking `auth.token`. The child writes its result
 // to STDERR as one JSON line so the test's own bookkeeping never collides
 // with the protocol channel it's exercising — stdout is exclusively
 // `auth.token` frames.
@@ -85,6 +84,23 @@ describe('supervised stdio auth', () => {
     await finish(child)
     assert.equal(result.ok, true, JSON.stringify(result))
     assert.equal(result.token, 'supervised-token-abc')
+  })
+
+  it('exits on its own once the work is done, with the parent still attached', async () => {
+    const child = spawnChild(CHILD_ASK_ONCE)
+    const frame = await readFrame(child)
+    writeLine(child, JSON.stringify({
+      jsonrpc: '2.0', id: frame.id,
+      result: { token: 'supervised-token-abc', expires_in: 300 },
+    }))
+    const result = await readResult(child)
+    assert.equal(result.ok, true, JSON.stringify(result))
+    const exited = await Promise.race([
+      new Promise((resolve) => child.once('close', () => resolve(true))),
+      new Promise((resolve) => setTimeout(() => resolve(false), 3000)),
+    ])
+    if (!exited) child.kill()
+    assert.ok(exited, 'child kept running after its last token ask — stdin held the event loop open')
   })
 
   it('ignores stray and mismatched-id lines', async () => {

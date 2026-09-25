@@ -5,8 +5,10 @@
  * Handles service-identity token acquisition (client credentials) and
  * user impersonation via `acting_as`.
  *
+ * `client.login` covers the OAuth2 authorization-code + PKCE exchange for a
+ * server-side (confidential) app; sessions and routing stay yours.
+ *
  * Intentionally out of scope — leave to the user's chosen libraries:
- *   - OAuth2 authorization-code redirect (framework concern)
  *   - ID-token JWT verification (pick `jose`, `jsonwebtoken`, etc.)
  *   - HTTP pooling / retry / backoff (wrap `fetch` as you see fit)
  *
@@ -34,8 +36,18 @@
 
 import { watch as _watch, watchSchema as _watchSchema, getMultiplexer, Watch, SchemaWatch, WatchError } from './watch.js'
 import { watchQuery as _watchQuery, watchSqlTemplate as _watchSqlTemplate, QueryWatch, SqlTemplateWatch } from './watch-query.js'
+import { createLoginApi, rejectingLoginStore, MemoryLoginStore } from './login.js'
+import { createBrowserLogin as _createBrowserLogin, silentCallback } from './browser-login.js'
 
-export { Watch, SchemaWatch, WatchError, QueryWatch, SqlTemplateWatch }
+export { Watch, SchemaWatch, WatchError, QueryWatch, SqlTemplateWatch, MemoryLoginStore, silentCallback }
+
+/**
+ * Browser login as a public client (PKCE, silent renew, tokens in memory).
+ * Pass `login.tokenProvider()` to `createClient({ tokenProvider })`.
+ */
+export function createBrowserLogin(config) {
+  return _createBrowserLogin(config, { SynthigyError })
+}
 
 // ============================================================================
 // Operators — helper functions for building where clauses
@@ -423,8 +435,7 @@ class TokenManager {
 }
 
 // ============================================================================
-// Supervised stdio — SYNTHIGY_SUPERVISED=1, see
-// docs/plans/PLAN-EXEC-IDENTITY.md steps 2-4. The SDK never mints locally
+// Supervised stdio — SYNTHIGY_SUPERVISED=1. The SDK never mints locally
 // under this mode: the CLI/commander is the platform's stdio owner, so a
 // token is asked for over JSON-RPC on the process's OWN stdio (supervise
 // grammar) instead. {token, expires_in} is deliberately byte-compatible
@@ -520,6 +531,7 @@ class SupervisedIO {
   _ask(method, params, timeoutMs) {
     this._ensureReader()
     this._ensureWriteGuard()
+    process.stdin.ref?.()
     const id = ++this._nextId
     return new Promise((resolve) => {
       let settled = false
@@ -529,6 +541,8 @@ class SupervisedIO {
         settled = true
         clearTimeout(timer)
         this._pending.delete(id)
+        // a ref'd stdin keeps the event loop alive — the process would never exit
+        if (this._pending.size === 0) process.stdin.unref?.()
         resolve(v)
       }
       timer = setTimeout(() => deliver(null), timeoutMs)
@@ -592,8 +606,7 @@ function _getSupervisedIO() {
 /**
  * Token source for SYNTHIGY_SUPERVISED=1 — asks `auth.token` over the
  * process's own stdio instead of minting locally (the CLI/commander is
- * the platform's stdio owner; this SDK never mints, per
- * PLAN-EXEC-IDENTITY step 2). Same public shape as TokenManager
+ * the platform's stdio owner; this SDK never mints). Same public shape as TokenManager
  * (getToken/clear) so call sites don't care which source is installed —
  * a thin handle onto the real, process-wide SupervisedIO singleton
  * (cache and all), so multiple clients in one process share one cache
@@ -609,7 +622,7 @@ class SupervisedTokenSource {
   }
 }
 
-/** The teaching throw — PLAN-EXEC-IDENTITY step 3: the error IS the UX, no flag, no silent anonymous fallback. */
+/** The teaching throw: the error IS the UX, no flag, no silent anonymous fallback. */
 function _noTokenError() {
   return new SynthigyError(
     'no Synthigy token: set token, or clientId + clientSecret, or set ' +
@@ -647,6 +660,16 @@ const ERROR_CATEGORIES = {
   PROVISION_FORBIDDEN:        'auth',
   CLAIM_INVALID:              'auth',
   NO_TOKEN:                   'auth', // client-side: no token source configured — retrying can't fix it
+  NO_ENDPOINT:                'validation', // client-side: no endpoint configured — retrying can't fix it
+  NO_LOGIN_STORE:             'auth', // client-side: no login store registered — retrying can't fix it
+  LOGIN_NONCE_MISMATCH:       'auth',
+  LOGIN_EXCHANGE_FAILED:      'auth',
+  SILENT_TIMEOUT:             'auth',
+  // OAuth error codes the IdP redirects back with (RFC 6749 4.1.2.1, OIDC 3.1.2.6)
+  access_denied:              'auth',
+  login_required:             'auth',
+  consent_required:           'auth',
+  interaction_required:       'auth',
   // iam
   FORBIDDEN:                  'iam',
   FORBIDDEN_OP:               'iam',
@@ -681,7 +704,13 @@ const ERROR_CATEGORIES = {
   PARAM_MISSING:              'validation',
   PARAM_TYPE_MISMATCH:        'validation',
   NOT_CONNECTED:              'validation', // client-side guard — retrying without connecting can't fix it
+  LOGIN_STATE_UNKNOWN:        'validation',
+  LOGIN_REQUIRES_CONFIDENTIAL_CLIENT: 'validation',
   XID_REQUIRED:               'validation',
+  NAMESPACE_REQUIRED:         'validation',
+  DUPLICATE_OPERATION:        'validation',
+  BATCH_MEMBER_UNRESOLVED:    'validation',
+  CONFIG_ERROR:               'validation',
   CLAIM_METHOD_NOT_ALLOWED:   'validation',
   PASSWORD_TOO_WEAK:          'validation',
   RETURN_URL_NOT_REGISTERED:  'validation',
@@ -831,15 +860,17 @@ async function onboardError(resp) {
 class SynthigyClient {
   /**
    * @param {Object} config
-   * @param {string} config.endpoint - Synthigy base URL
+   * @param {string} [config.endpoint] - Synthigy base URL (default $SYNTHIGY_ENDPOINT)
    * @param {string} [config.clientId] - OAuth client ID (for client credentials)
    * @param {string} [config.clientSecret] - OAuth client secret
    * @param {string} [config.token] - Static bearer token (alternative to client credentials)
+   * @param {{getToken: (audience?: string) => string|null|Promise<string|null>, clear: () => void}} [config.tokenProvider]
+   *   - Caller-owned token source; `clear()` is called on a 401 before the one retry
    *
    * On Node, with none of the above, the constructor also falls back to —
    * when SYNTHIGY_SUPERVISED=1 — a supervised-stdio auth.token ask (the
    * pipe beats the env var: it can refresh mid-run), then the
-   * SYNTHIGY_TOKEN env var (see docs/plans/PLAN-EXEC-IDENTITY.md step 3).
+   * SYNTHIGY_TOKEN env var.
    * With no source at all it throws a SynthigyError whose code is
    * NO_TOKEN and whose message teaches the fix. A browser has neither
    * env vars nor a stdio parent, so it always requires an explicit source.
@@ -863,17 +894,24 @@ class SynthigyClient {
    *       fetch: (url, init) => fetch(url, { ...init, dispatcher: agent }),
    *     })
    */
-  constructor(config) {
-    this._endpoint = config.endpoint.replace(/\/$/, '')
+  constructor(config = {}) {
+    const endpoint = config.endpoint
+      ?? (typeof process !== 'undefined' ? process.env?.SYNTHIGY_ENDPOINT : undefined)
+    if (!endpoint) {
+      throw new SynthigyError(
+        'no endpoint — pass config.endpoint, or set SYNTHIGY_ENDPOINT (run under `synthigy exec`)',
+        'NO_ENDPOINT')
+    }
+    this._endpoint = endpoint.replace(/\/$/, '')
     this._dataUrl = `${this._endpoint}/data`
     this._defaultActingAs = config.actingAs ?? null
     this._defaultKeyFormat = config.keyFormat ?? null
     this._timeout = config.timeout ?? null
     this._fetch = config.fetch ?? globalThis.fetch.bind(globalThis)
-    // Stored so the OIDC helpers can authenticate code-exchange and
-    // default the ID-token audience to this client's own id.
+    // Stored so `client.login` can authenticate the code exchange.
     this._clientId = config.clientId ?? null
     this._clientSecret = config.clientSecret ?? null
+    this._loginStore = config.loginStore ?? rejectingLoginStore(SynthigyError)
     // Long-lived contexts (BFFs, Node services) want the upstream SSE pinned
     // open across user-watch churn so the plug session keyed by
     // [sub, client_id] isn't torn down between watches. Replaces the
@@ -890,7 +928,12 @@ class SynthigyClient {
       ?? (typeof process !== 'undefined' ? process.env?.SYNTHIGY_AUDIENCE : undefined)
       ?? PLATFORM_AUDIENCE
 
-    if (config.token !== undefined && config.token !== null) {
+    if (config.tokenProvider) {
+      // Caller-owned source ({ getToken(audience), clear() }) — e.g. the
+      // browser login. clear() on a 401 is its cue to refresh.
+      this._tokenManager = config.tokenProvider
+      this._getToken = () => this._tokenManager.getToken(this._defaultAudience)
+    } else if (config.token !== undefined && config.token !== null) {
       // Static token mode — empty string allowed for unauth / dev servers.
       this._tokenManager = null
       this._getToken = async () => config.token
@@ -1775,6 +1818,55 @@ class SynthigyClient {
   }
 
   /**
+   * Compile an XSQL source to the wire operation the engine would execute,
+   * via `POST /compile` — nothing runs. The compiler is the authority on
+   * the wire format, so this is how you take programmatic control of a
+   * query instead of hand-writing the JSON: edit the returned map and send
+   * it through `batch()`.
+   *
+   * `params` bind exactly as they do on `query()`, so what comes back IS
+   * what the engine receives.
+   *
+   * @param {string} source - XSQL source (bare body or full `@verb` document)
+   * @param {Object} [opts]
+   * @param {Object} [opts.params] - `?name:type` bindings
+   * @param {'search'|'get'|'slice'|'purge'} [opts.op='search'] - verb for a bare body
+   * @returns {Promise<Object>} the wire op `{op, entity, args, selections}`
+   *
+   * @example
+   * ```js
+   * const op = await client.compile('movie (limit ?n:int=5)\n  title\n',
+   *                                 { params: { n: 2 } })
+   * op.args._limit = 10
+   * const [rows] = await client.batch([op])
+   * ```
+   */
+  async compile(source, opts) {
+    const op = { op: 'xsql', xsql: xsqlDocument(source, opts?.op ?? 'search') }
+    if (opts?.params) op.params = opts.params
+    const resp = await this._fetchAuth(`${this._endpoint}/compile`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ operations: [op] }),
+    })
+    const json = await resp.json().catch(() => ({}))
+    if (!resp.ok) {
+      throw new SynthigyError(
+        json.error?.message || `Compile request failed (${resp.status})`,
+        json.error?.code || 'HTTP_ERROR'
+      )
+    }
+    const [result] = json.results ?? []
+    if (!result?.ok) {
+      throw new SynthigyError(
+        result?.error?.message || 'Compile failed',
+        result?.error?.code || 'XSQL_PARSE_ERROR'
+      )
+    }
+    return result.operation
+  }
+
+  /**
    * Mint a one-time account-claim link via `POST /oauth/onboard`.
    * Confidential client whose principal administers the account — RBAC
    * update on User plus the row inside its owner-group write scope, which
@@ -1959,6 +2051,11 @@ class SynthigyClient {
     }
     const body = await resp.json()
     return body.result
+  }
+
+  get login() {
+    if (!this._login) this._login = createLoginApi(this, { SynthigyError })
+    return this._login
   }
 
   // Defined as a regular property so the .d.ts namespace `client.history.foo`
@@ -2426,6 +2523,7 @@ export const op = {
   searchTree:  (entity, on, args, sel)   => ({ op: 'search-tree', entity, on, args, selections: normalizeSelection(sel) }),
   getTree:     (entity, root, on, sel)   => ({ op: 'get-tree',    entity, root, on, selections: normalizeSelection(sel) }),
   sqlTemplate: (template, params)        => ({ op: 'sql-template', template, params: params || [] }),
+  query:       (xsql, params, verb = 'search') => ({ op: 'xsql', xsql: xsqlDocument(xsql, verb), ...(params !== undefined && { params }) }),
   deployedModel: () => ({ op: 'deployed-model' }),
   runtimeModel: () => ({ op: 'runtime-model' }),
   deploy:       (exportContents)         => ({ op: 'deploy', data: exportContents }),
@@ -2440,7 +2538,7 @@ export const op = {
  * Create a Synthigy client.
  *
  * @param {Object} config
- * @param {string} config.endpoint - Synthigy base URL
+ * @param {string} [config.endpoint] - Synthigy base URL (default $SYNTHIGY_ENDPOINT)
  * @param {string} [config.clientId] - OAuth client ID
  * @param {string} [config.clientSecret] - OAuth client secret
  * @param {string} [config.token] - Static bearer token (alternative to client credentials)
@@ -2467,7 +2565,7 @@ export const op = {
  * })
  * ```
  */
-export function createClient(config) {
+export function createClient(config = {}) {
   return new SynthigyClient(config)
 }
 
@@ -2496,7 +2594,7 @@ let _defaultClient = null
  * @param {Object} config - same shape as {@link createClient}
  * @returns {SynthigyClient} the installed client (for introspection)
  */
-export function connect(config) {
+export function connect(config = {}) {
   const prev = _defaultClient
   _defaultClient = new SynthigyClient(config)
   if (prev) prev.close() // destroy the old one, server-restart style
@@ -2553,6 +2651,7 @@ export { _delete as delete }
 // Schema / introspection
 export const schema        = (...a) => _dflt().schema(...a)
 export const lint          = (...a) => _dflt().lint(...a)
+export const compile       = (...a) => _dflt().compile(...a)
 export const onboard       = (...a) => _dflt().onboard(...a)
 export const onboardComplete = (...a) => _dflt().onboardComplete(...a)
 export const deploy        = (...a) => _dflt().deploy(...a)
@@ -2561,6 +2660,7 @@ export const deployedModel = (...a) => _dflt().deployedModel(...a)
 export const runtimeModel  = (...a) => _dflt().runtimeModel(...a)
 export const token         = (...a) => _dflt().token(...a)
 export const history       = () => _dflt().history
+export const login         = () => _dflt().login
 
 // Streaming + live watches
 export const listen           = (...a) => _dflt().listen(...a)

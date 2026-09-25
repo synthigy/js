@@ -3,6 +3,90 @@
 All notable changes to `@synthigy/sdk`. Follows [semver](https://semver.org).
 Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.2.0
+
+### Added
+- **Browser login: `createBrowserLogin`** — authorization code + PKCE as a
+  public client, the flow Synthigy's own tools use: `start()` / `complete()` /
+  `cancel()`, silent renew through a hidden `prompt=none` iframe (`renew()`,
+  automatic before expiry), `logout()`, events, and tokens in memory only.
+  The silent-redirect page calls `silentCallback()` first. `loadUserInfo: true`
+  merges `/oauth/userinfo` (name, email) into `login.user`.
+- **`createClient({ tokenProvider })`** — a caller-owned token source
+  (`getToken(audience)`, `clear()`). `clear()` runs on a 401 before the one
+  retry; `login.tokenProvider()` renews there.
+- **`synthigy-gen` generates `@batch`.** Each batch is one exported function
+  that sends all its members in ONE request and returns them keyed by member
+  name, each typed with its own result; a failed member is a `SynthigyError`
+  value in its slot rather than a throw. Params are one object shared by every
+  member. It used to be skipped with a warning.
+- **`op.query(xsql, params, verb)`** — an XSQL read for `exec` batches, beside
+  the existing `op.*` builders.
+- **`createClient()` / `connect()` / generated `configure()` take the
+  endpoint from `SYNTHIGY_ENDPOINT` when `config.endpoint` is absent.** Under
+  `synthigy exec` that and the identity are already set, so `connect()` with no
+  arguments is the whole setup. No endpoint anywhere throws `NO_ENDPOINT`
+  (category `validation`, not retryable); it used to be a `TypeError` on
+  `undefined.replace`.
+- **`client.login`** — the OIDC authorization-code + PKCE exchange for a
+  server-side (confidential) app: `start()` builds the authorize URL and
+  stashes the PKCE verifier, `complete()` exchanges the callback's code and
+  returns `{ user: { xid, name, scopes }, tokens, returnTo }`, `cancel()`
+  recovers `returnTo` when the visitor backs out at the login page. The user's
+  xid comes straight out of the id_token — no `/data` lookup — which needs an
+  engine that puts `xid` on every token it signs.
+
+  Sessions, cookies and routing stay the app's. The one piece of protocol state
+  the SDK can't hold, the in-flight login, goes in a `loginStore` you register
+  via `createClient({ loginStore })`: any object with `put(state, login)` and
+  `take(state)`. There is no default — without one `login.*` throws
+  `NO_LOGIN_STORE` with instructions. `MemoryLoginStore` is exported for
+  single-process dev servers.
+
+  New error codes: `NO_LOGIN_STORE`, `LOGIN_REQUIRES_CONFIDENTIAL_CLIENT`,
+  `LOGIN_STATE_UNKNOWN`, `LOGIN_NONCE_MISMATCH`, `LOGIN_EXCHANGE_FAILED`.
+  Zero new dependencies: WebCrypto, `btoa`/`atob`, `URL`.
+- **`compile(source, opts)`** — `POST /compile` returns the wire operation the
+  engine would execute for an XSQL source, without executing it. The compiler
+  is the authority on the wire format, so this is how you take programmatic
+  control of a query instead of hand-writing the JSON: edit what comes back
+  and send it through `exec([op])`. `opts.params` bind exactly as on `query`,
+  so the result IS what the engine receives. Also exported module-level and
+  typed in `index.d.ts`.
+
+### Fixed
+- **`op.sync` / `op.stack` accept a list of records** in `index.d.ts`, as the
+  client's `sync`/`stack` already did.
+- **`index.d.ts` declares the module-level `onboard` / `onboardComplete`.**
+  `index.js` exported them, but TypeScript callers couldn't import them.
+- **A Node process run under `synthigy exec` exits when its work is done.**
+  The supervised token reader held stdin open for the life of the process, so
+  a script that fetched a token never finished on its own. stdin is now
+  released between token requests.
+- **`synthigy-gen check` runs offline.** With no `SYNTHIGY_*` server settings
+  it passes on a matching source hash, like the other SDKs' checks; it used to
+  demand a live describe and fail in CI without credentials.
+- **`synthigy-gen` works with TypeScript 7.** `npm install typescript` now
+  installs 7, the native compiler, which has no JavaScript API; the generator
+  crashed on `ts.NewLineKind`. It no longer uses that API: output is written as
+  generated (formatting changes once when you regenerate) and `typescript` is
+  only needed for the type-check gate, which runs on 5, 6 and 7.
+
+### Changed
+- **`synthigy-gen` no longer falls back to `http://localhost:7887`.** With no
+  endpoint passed and no `SYNTHIGY_ENDPOINT`, a run that needs the server
+  fails with `NO_ENDPOINT`, as the client does; offline runs from a current
+  `ops.ir.json` are unaffected.
+- **`synthigy-gen` searches directories recursively** for `.xsql`
+  files, sorted by path; it read only a directory's top level.
+- **Codegen:** each `.xsql` file is sent to `describe` separately (`sources: [{path,
+  source}]`) instead of one concatenated text. Concatenation leaked the
+  first file's buffer-level `@namespace` into every later file and dropped
+  the others'. Needs an engine with per-file `describe`. A `(namespace,
+  name)` declared twice across files now fails with `DUPLICATE_OPERATION`,
+  naming both files; a `@batch` naming an op from another file fails with
+  `BATCH_MEMBER_UNRESOLVED`. Both are `validation` in the error table.
+
 ## 0.1.2
 
 ### Added
@@ -101,7 +185,7 @@ First public release.
 - **`op: "aggregate"` removed** (→ `UNKNOWN_OP`). Aggregates go through
   `sqlTemplate` / `_count` / `_agg` selection keys.
 
-## Unreleased — 2026-05-31
+## Pre-release development (2026-05-31)
 
 ### Added
 
@@ -268,7 +352,7 @@ First public release.
 - **`GET /logout`** route in the datastar-movies example so error banners
   can clear sessions with a plain anchor.
 
-## 0.1.0 — initial sketch
+## Initial sketch (pre-release)
 
 Initial JS SDK. Surfaces:
 

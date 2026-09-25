@@ -1,6 +1,6 @@
 import { describe, it, mock, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { createClient, eq, neq, gt, gte, lt, lte, in_, nin, like, ilike, isNull, isNotNull, rel, op, SynthigyError, composeTree, composeForest } from '../src/index.js'
+import { createClient, eq, neq, gt, gte, lt, lte, in_, nin, like, ilike, isNull, isNotNull, rel, op, SynthigyError, composeTree, composeForest, MemoryLoginStore } from '../src/index.js'
 
 // Mock fetch globally
 const mockFetch = mock.fn()
@@ -18,12 +18,36 @@ function mockResponse(status, body) {
 describe('createClient', () => {
   it('requires token or client credentials', () => {
     // Only meaningful with no SYNTHIGY_TOKEN/SYNTHIGY_SUPERVISED in the
-    // test environment — both are env-level fallbacks now
-    // (PLAN-EXEC-IDENTITY step 3).
+    // test environment — both are env-level fallbacks.
     assert.throws(
       () => createClient({ endpoint: 'http://localhost' }),
       (err) => err instanceof SynthigyError && err.code === 'NO_TOKEN'
     )
+  })
+
+  it('takes the endpoint from SYNTHIGY_ENDPOINT', () => {
+    const prev = process.env.SYNTHIGY_ENDPOINT
+    process.env.SYNTHIGY_ENDPOINT = 'http://example.test/'
+    try {
+      assert.equal(createClient({ token: 't' })._endpoint, 'http://example.test')
+    } finally {
+      if (prev === undefined) delete process.env.SYNTHIGY_ENDPOINT
+      else process.env.SYNTHIGY_ENDPOINT = prev
+    }
+  })
+
+  it('refuses a missing endpoint with a typed, non-retryable error', () => {
+    const prev = process.env.SYNTHIGY_ENDPOINT
+    delete process.env.SYNTHIGY_ENDPOINT
+    try {
+      assert.throws(
+        () => createClient({ token: 't' }),
+        (err) => err instanceof SynthigyError && err.code === 'NO_ENDPOINT' &&
+                 err.category === 'validation' && err.retryable === false
+      )
+    } finally {
+      if (prev !== undefined) process.env.SYNTHIGY_ENDPOINT = prev
+    }
   })
 
   it('creates client with static token', () => {
@@ -232,6 +256,10 @@ describe('error handling', () => {
     for (const [code, category] of [
       ['HISTORY_UNAVAILABLE', 'not_found'],
       ['NOT_CONNECTED', 'validation'],
+      ['NO_LOGIN_STORE', 'auth'],
+      ['LOGIN_STATE_UNKNOWN', 'validation'],
+      ['LOGIN_NONCE_MISMATCH', 'auth'],
+      ['LOGIN_REQUIRES_CONFIDENTIAL_CLIENT', 'validation'],
     ]) {
       const e = new SynthigyError('x', code)
       assert.equal(e.category, category, `${code} category`)
@@ -1405,6 +1433,274 @@ describe('lint', () => {
       () => client.lint(''),
       (err) => err instanceof SynthigyError && err.code === 'INVALID_BODY'
     )
+  })
+})
+
+describe('compile', () => {
+  beforeEach(() => mockFetch.mock.resetCalls())
+
+  it('POSTs the xsql DOCUMENT op to /compile and returns the wire op', async () => {
+    const client = createClient({ endpoint: 'http://localhost', token: 't' })
+    const wireOp = {
+      op: 'search', entity: 'movie',
+      args: { _limit: 2 }, selections: { title: null },
+    }
+
+    mockFetch.mock.mockImplementation(async (url, opts) => {
+      assert.equal(url, 'http://localhost/compile')
+      assert.equal(opts.method, 'POST')
+      const body = JSON.parse(opts.body)
+      assert.equal(body.operations.length, 1)
+      assert.equal(body.operations[0].op, 'xsql')
+      assert.ok(body.operations[0].xsql.startsWith('@search _q\n'))
+      assert.deepEqual(body.operations[0].params, { n: 2 })
+      return mockResponse(200, { results: [{ ok: true, operation: wireOp }] })
+    })
+
+    const op = await client.compile('movie (limit ?n:int=5)\n  title\n',
+                                    { params: { n: 2 } })
+    assert.deepEqual(op, wireOp)
+  })
+
+  it('passes a full @verb document through untouched', async () => {
+    const client = createClient({ endpoint: 'http://localhost', token: 't' })
+    mockFetch.mock.mockImplementation(async (_url, opts) => {
+      const body = JSON.parse(opts.body)
+      assert.equal(body.operations[0].xsql, '@get one\nmovie (xid = ?x:string)\n  title\n')
+      assert.ok(!('params' in body.operations[0]))
+      return mockResponse(200, { results: [{ ok: true, operation: { op: 'get' } }] })
+    })
+    await client.compile('@get one\nmovie (xid = ?x:string)\n  title\n')
+  })
+
+  it('throws SynthigyError on a per-op compile failure', async () => {
+    const client = createClient({ endpoint: 'http://localhost', token: 't' })
+    mockFetch.mock.mockImplementation(async () =>
+      mockResponse(200, { results: [{ ok: false, error: {
+        message: 'XSQL parse error: boom', code: 'XSQL_PARSE_ERROR',
+      } }] })
+    )
+    await assert.rejects(
+      () => client.compile('movie (\n'),
+      (err) => err instanceof SynthigyError && err.code === 'XSQL_PARSE_ERROR'
+    )
+  })
+
+  it('throws SynthigyError on HTTP error', async () => {
+    const client = createClient({ endpoint: 'http://localhost', token: 't' })
+    mockFetch.mock.mockImplementation(async () =>
+      mockResponse(400, { error: { message: 'bad body', code: 'INVALID_BODY' } })
+    )
+    await assert.rejects(
+      () => client.compile(''),
+      (err) => err instanceof SynthigyError && err.code === 'INVALID_BODY'
+    )
+  })
+})
+
+describe('login', () => {
+  beforeEach(() => mockFetch.mock.resetCalls())
+
+  const confidential = (extra = {}) => createClient({
+    endpoint: 'http://localhost',
+    clientId: 'bff',
+    clientSecret: 's3cret',
+    ...extra,
+  })
+
+  // A store that also records what was put, so a test can read the verifier
+  // back without reaching into the client.
+  function spyStore() {
+    const inner = new MemoryLoginStore()
+    const seen = []
+    return {
+      seen,
+      put(state, login) { seen.push({ state, login }); return inner.put(state, login) },
+      take(state) { return inner.take(state) },
+    }
+  }
+
+  function idToken(payload) {
+    const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url')
+    return `${b64({ alg: 'RS256' })}.${b64(payload)}.sig`
+  }
+
+  it('refuses a client with no secret — login is a confidential-client flow', async () => {
+    const client = createClient({ endpoint: 'http://localhost', token: 't' })
+    await assert.rejects(
+      () => client.login.start({ redirectUri: 'http://app/cb' }),
+      (err) => err instanceof SynthigyError
+        && err.code === 'LOGIN_REQUIRES_CONFIDENTIAL_CLIENT'
+    )
+  })
+
+  it('refuses when no loginStore was registered', async () => {
+    await assert.rejects(
+      () => confidential().login.start({ redirectUri: 'http://app/cb' }),
+      (err) => err instanceof SynthigyError && err.code === 'NO_LOGIN_STORE'
+    )
+  })
+
+  it('builds an authorize URL whose challenge is the S256 of the stored verifier', async () => {
+    const store = spyStore()
+    const { url } = await confidential({ loginStore: store })
+      .login.start({ redirectUri: 'http://app/cb', returnTo: '/movies' })
+
+    const u = new URL(url)
+    assert.equal(u.origin + u.pathname, 'http://localhost/oauth/authorize')
+    assert.equal(u.searchParams.get('response_type'), 'code')
+    assert.equal(u.searchParams.get('client_id'), 'bff')
+    assert.equal(u.searchParams.get('redirect_uri'), 'http://app/cb')
+    assert.equal(u.searchParams.get('scope'), 'openid')
+    assert.equal(u.searchParams.get('code_challenge_method'), 'S256')
+    assert.ok(u.searchParams.get('state'))
+    assert.ok(u.searchParams.get('nonce'))
+
+    assert.equal(store.seen.length, 1)
+    const { state, login } = store.seen[0]
+    assert.equal(state, u.searchParams.get('state'))
+    assert.equal(login.returnTo, '/movies')
+
+    const digest = await crypto.subtle.digest(
+      'SHA-256', new TextEncoder().encode(login.codeVerifier))
+    const expected = Buffer.from(new Uint8Array(digest)).toString('base64url')
+    assert.equal(u.searchParams.get('code_challenge'), expected)
+  })
+
+  it('points the browser at publicEndpoint while exchanging against endpoint', async () => {
+    const store = spyStore()
+    const client = confidential({ loginStore: store })
+    const { url } = await client.login.start({
+      redirectUri: 'http://app/cb',
+      publicEndpoint: 'https://auth.example.com',
+    })
+    assert.ok(url.startsWith('https://auth.example.com/oauth/authorize?'))
+
+    const { state, login } = store.seen[0]
+    mockFetch.mock.mockImplementation(async (u) => {
+      assert.equal(u, 'http://localhost/oauth/token')
+      return mockResponse(200, {
+        access_token: 'a',
+        id_token: idToken({ sub: 'alice', xid: 'x1', nonce: login.nonce }),
+      })
+    })
+    await client.login.complete({ code: 'c', state, redirectUri: 'http://app/cb' })
+  })
+
+  it('exchanges the code and reads xid + name straight off the id_token', async () => {
+    const store = spyStore()
+    const client = confidential({ loginStore: store })
+    const { url } = await client.login.start({ redirectUri: 'http://app/cb', returnTo: '/r' })
+    const state = new URL(url).searchParams.get('state')
+    const { login } = store.seen[0]
+
+    mockFetch.mock.mockImplementation(async (u, opts) => {
+      assert.equal(u, 'http://localhost/oauth/token')
+      assert.equal(opts.method, 'POST')
+      assert.equal(opts.headers['Content-Type'], 'application/x-www-form-urlencoded')
+      const body = opts.body.toString()
+      assert.ok(body.includes('grant_type=authorization_code'))
+      assert.ok(body.includes('code=the-code'))
+      assert.ok(body.includes('client_secret=s3cret'))
+      assert.ok(body.includes(`code_verifier=${login.codeVerifier}`))
+      return mockResponse(200, {
+        access_token: 'at', refresh_token: 'rt', scope: 'openid email',
+        id_token: idToken({ sub: 'alice', xid: 'user-xid-1', nonce: login.nonce }),
+      })
+    })
+
+    const out = await client.login.complete({
+      code: 'the-code', state, redirectUri: 'http://app/cb',
+    })
+    assert.deepEqual(out.user, {
+      xid: 'user-xid-1', name: 'alice', scopes: ['openid', 'email'],
+    })
+    assert.equal(out.returnTo, '/r')
+    assert.equal(out.tokens.access_token, 'at')
+  })
+
+  it('rejects an id_token whose nonce is not the one this login started with', async () => {
+    const store = spyStore()
+    const client = confidential({ loginStore: store })
+    const { url } = await client.login.start({ redirectUri: 'http://app/cb' })
+    const state = new URL(url).searchParams.get('state')
+
+    mockFetch.mock.mockImplementation(async () => mockResponse(200, {
+      access_token: 'at', id_token: idToken({ sub: 'alice', nonce: 'somebody-elses' }),
+    }))
+    await assert.rejects(
+      () => client.login.complete({ code: 'c', state, redirectUri: 'http://app/cb' }),
+      (err) => err instanceof SynthigyError && err.code === 'LOGIN_NONCE_MISMATCH'
+    )
+  })
+
+  it('rejects an unknown state, and a state is one-shot', async () => {
+    const store = spyStore()
+    const client = confidential({ loginStore: store })
+    const { url } = await client.login.start({ redirectUri: 'http://app/cb' })
+    const state = new URL(url).searchParams.get('state')
+    const { login } = store.seen[0]
+
+    mockFetch.mock.mockImplementation(async () => mockResponse(200, {
+      access_token: 'at', id_token: idToken({ sub: 'a', xid: 'x', nonce: login.nonce }),
+    }))
+    await client.login.complete({ code: 'c', state, redirectUri: 'http://app/cb' })
+
+    // Replaying the same callback finds nothing.
+    await assert.rejects(
+      () => client.login.complete({ code: 'c', state, redirectUri: 'http://app/cb' }),
+      (err) => err instanceof SynthigyError && err.code === 'LOGIN_STATE_UNKNOWN'
+    )
+    await assert.rejects(
+      () => client.login.complete({ code: 'c', state: 'never-seen', redirectUri: 'http://app/cb' }),
+      (err) => err instanceof SynthigyError && err.code === 'LOGIN_STATE_UNKNOWN'
+    )
+  })
+
+  it('surfaces a non-2xx token endpoint as LOGIN_EXCHANGE_FAILED with the status', async () => {
+    const store = spyStore()
+    const client = confidential({ loginStore: store })
+    const { url } = await client.login.start({ redirectUri: 'http://app/cb' })
+    const state = new URL(url).searchParams.get('state')
+
+    mockFetch.mock.mockImplementation(async () =>
+      mockResponse(400, { error: 'invalid_grant' }))
+    await assert.rejects(
+      () => client.login.complete({ code: 'c', state, redirectUri: 'http://app/cb' }),
+      (err) => err instanceof SynthigyError
+        && err.code === 'LOGIN_EXCHANGE_FAILED'
+        && err.status === 400
+    )
+  })
+
+  it('fails a token response with no id_token — that is where the user is named', async () => {
+    const store = spyStore()
+    const client = confidential({ loginStore: store })
+    const { url } = await client.login.start({ redirectUri: 'http://app/cb' })
+    const state = new URL(url).searchParams.get('state')
+
+    mockFetch.mock.mockImplementation(async () => mockResponse(200, { access_token: 'at' }))
+    await assert.rejects(
+      () => client.login.complete({ code: 'c', state, redirectUri: 'http://app/cb' }),
+      (err) => err instanceof SynthigyError && err.code === 'LOGIN_EXCHANGE_FAILED'
+    )
+  })
+
+  it('cancel recovers returnTo once, then reports nothing — a cancel is not an error', async () => {
+    const store = spyStore()
+    const client = confidential({ loginStore: store })
+    const { url } = await client.login.start({ redirectUri: 'http://app/cb', returnTo: '/deep' })
+    const state = new URL(url).searchParams.get('state')
+
+    assert.deepEqual(await client.login.cancel(state), { returnTo: '/deep' })
+    assert.equal(await client.login.cancel(state), null)
+    assert.equal(await client.login.cancel(null), null)
+  })
+
+  it('MemoryLoginStore forgets an expired login', () => {
+    const store = new MemoryLoginStore({ ttlMs: 0 })
+    store.put('s', { codeVerifier: 'v', nonce: 'n', returnTo: '/', createdAt: Date.now() - 1 })
+    assert.equal(store.take('s'), null)
   })
 })
 

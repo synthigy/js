@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Unified codegen tool:
-//   node codegen.mjs <file.xsql> [outDir]   — describe + gen TS (saves .ir.json)
-//   node codegen.mjs check <file.xsql>       — re-describe, diff, exit 1 on drift
+//   node codegen.mjs <xsql...> [outDir]     — describe + gen TS (saves ops.ir.json)
+//   node codegen.mjs check <xsql...>         — re-describe, diff, exit 1 on drift
 //   node codegen.mjs pull [endpoint] [out]   — pull schema.json (wraps pull.mjs)
 //
 // Config via env: SYNTHIGY_ENDPOINT, SYNTHIGY_CLIENT_ID, SYNTHIGY_CLIENT_SECRET
@@ -14,28 +14,12 @@ import { createRequire } from 'node:module'
 import { TS, tsScalar, pascal, camel } from './lib.mjs'
 import { PLATFORM_AUDIENCE } from '../src/index.js'
 
-// typescript is an optional peer: the runtime client has no dependencies and
-// must stay that way, but generating .ts files needs the compiler — resolved
-// from the consumer's project, where a TypeScript codebase already has it.
-let ts
+let tsVersion = null
 try {
-  ts = createRequire(import.meta.url)('typescript')
-} catch {
-  console.error('synthigy-gen: `typescript` is required to generate code and was not found.\n' +
-                '  npm install -D typescript')
-  process.exit(1)
-}
+  tsVersion = createRequire(import.meta.url)('typescript/package.json').version
+} catch {}
 
 const here = path.dirname(new URL(import.meta.url).pathname)
-
-// Reformat generated TS through the compiler's own printer: correct indentation,
-// spacing and semicolons with zero hand-managed `\n`. The printer round-trips the
-// AST, so it fixes structural formatting while preserving embedded XSQL template
-// literals verbatim. (Realizes the "AST emission" goal cheaply; the fail-loud tsc
-// gate below still validates the result.)
-const formatTs = (code, file) =>
-  ts.createPrinter({ newLine: ts.NewLineKind.LineFeed })
-    .printFile(ts.createSourceFile(file, code, ts.ScriptTarget.Latest, true))
 
 // ── args + flags ──────────────────────────────────────────────────────────────
 if (process.argv.includes('--help') || process.argv.includes('-h')) {
@@ -54,7 +38,7 @@ Flags:
   --schema <path>      explicit schema.json path (skips auto-pull)
 
 Environment:
-  SYNTHIGY_ENDPOINT        server URL (default: http://localhost:7887)
+  SYNTHIGY_ENDPOINT        server URL (required when a server is needed)
   SYNTHIGY_CLIENT_ID       OAuth client ID
   SYNTHIGY_CLIENT_SECRET   OAuth client secret
   SYNTHIGY_AUDIENCE        client_credentials audience, when the server requires one
@@ -99,13 +83,13 @@ if (pullMode) {
 // is input. check mode has no outDir — every positional is input.
 const rawPos  = checkMode ? pos.slice(1) : pos
 const lastPos = rawPos[rawPos.length - 1]
-const hasExplicitOut = !checkMode && lastPos && !lastPos.endsWith('.xsql')
+const hasExplicitOut = !checkMode && rawPos.length > 1 && !lastPos.endsWith('.xsql')
 const outArg  = hasExplicitOut ? lastPos : undefined
 const xsqlArgs = hasExplicitOut ? rawPos.slice(0, -1) : rawPos
 
 if (!xsqlArgs.length) {
-  console.error('usage: node codegen.mjs [flags] <file.xsql> [file2.xsql ...] [outDir]')
-  console.error('       node codegen.mjs check <file.xsql> [file2.xsql ...]')
+  console.error('usage: node codegen.mjs [flags] <file.xsql|dir> [...] [outDir]   (dirs searched recursively)')
+  console.error('       node codegen.mjs check <file.xsql|dir> [...]')
   console.error('       node codegen.mjs pull [endpoint] [schema.json]')
   console.error('flags: --pull                force schema refresh')
   console.error('       --keys snake|camel    field casing (default: snake)')
@@ -114,14 +98,20 @@ if (!xsqlArgs.length) {
   process.exit(1)
 }
 
+const isDir = p => fs.existsSync(p) && fs.statSync(p).isDirectory()
 const xsqlPaths = xsqlArgs.flatMap(a => {
   const p = path.resolve(a)
-  if (fs.existsSync(p) && fs.statSync(p).isDirectory())
-    return fs.readdirSync(p).filter(f => f.endsWith('.xsql')).sort().map(f => path.join(p, f))
+  if (isDir(p))
+    return fs.readdirSync(p, { recursive: true })
+      .map(f => f.split(path.sep).join('/'))
+      .filter(f => f.endsWith('.xsql') && fs.statSync(path.join(p, f)).isFile())
+      .sort()
+      .map(f => path.join(p, f))
   return [p]
 })
 if (!xsqlPaths.length) { console.error('no .xsql files found'); process.exit(1) }
-const xsqlDir   = path.dirname(xsqlPaths[0])   // schema.json lives next to first file
+const firstArg  = path.resolve(xsqlArgs[0])
+const xsqlDir   = isDir(firstArg) ? firstArg : path.dirname(firstArg)   // IR + schema.json home
 const irPath    = path.join(xsqlDir, 'ops.ir.json')
 const outDir    = checkMode
   ? null
@@ -137,13 +127,18 @@ const schemaPath = flags.schemaOverride ?? localSchemaPath
 const toKey = flags.keys === 'camel' ? camel : s => s
 
 // ── describe ─────────────────────────────────────────────────────────────────
-const ENDPOINT = process.env.SYNTHIGY_ENDPOINT ?? 'http://localhost:7887'
+const ENDPOINT = process.env.SYNTHIGY_ENDPOINT
+function endpoint() {
+  if (ENDPOINT) return ENDPOINT
+  console.error('NO_ENDPOINT: no endpoint — set SYNTHIGY_ENDPOINT (run under `synthigy exec`)')
+  process.exit(1)
+}
 const { SYNTHIGY_CLIENT_ID, SYNTHIGY_CLIENT_SECRET, SYNTHIGY_AUDIENCE } = process.env
 
 // Auto-pull schema if missing or --pull requested (saved next to .xsql, cached for future runs).
 if (!flags.schemaOverride && (flags.pull || !fs.existsSync(schemaPath))) {
   execFileSync(process.execPath,
-    [path.join(here, 'pull.mjs'), ENDPOINT, schemaPath],
+    [path.join(here, 'pull.mjs'), endpoint(), schemaPath],
     { stdio: 'inherit', env: process.env })
 }
 
@@ -154,7 +149,7 @@ if (!fs.existsSync(schemaPath)) {
 
 async function token() {
   if (!SYNTHIGY_CLIENT_ID) return ''
-  const r = await fetch(`${ENDPOINT}/oauth/token`, {
+  const r = await fetch(`${endpoint()}/oauth/token`, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ grant_type: 'client_credentials',
@@ -169,20 +164,36 @@ async function token() {
 }
 
 // Merge all xsql files — ops are independent, names must be unique across files.
-const source = xsqlPaths.map(p => fs.readFileSync(p, 'utf8')).join('\n\n')
+// `@workspace` is buffer-scoped and must precede the first op, so only the
+// first file's survives the merge — left in place it lands INSIDE the
+// preceding file's last op and the server rejects that op at run time.
+const dropWorkspace = (src) => src.split('\n').filter(l => !/^@workspace\b/.test(l)).join('\n')
+const source = xsqlPaths
+  .map((p, i) => { const src = fs.readFileSync(p, 'utf8'); return i === 0 ? src : dropWorkspace(src) })
+  .join('\n\n')
+// describe parses each file on its own — concatenated, file 1's buffer
+// @namespace would leak into every later file and theirs would be dropped.
+const sources = xsqlPaths.map(p => ({
+  path: path.relative(xsqlDir, p).split(path.sep).join('/'),
+  source: fs.readFileSync(p, 'utf8'),
+}))
 // Contract between the .xsql sources on disk and the saved IR: the IR carries
 // the hash of the sources it was described from. Mismatch = the IR is stale.
 const sourceHash = createHash('sha256').update(source).digest('hex')
 
 // check mode fails FAST and OFFLINE when the sources drifted from the saved IR —
 // no backend/credentials needed to catch "edited .xsql, forgot codegen".
-// (A hash match still goes through the live describe-diff below: same sources
-// can yield a different IR after a server-side model change.)
+// A hash match still goes through the live describe-diff below when a server is
+// configured: same sources can yield a different IR after a model change.
 if (checkMode && fs.existsSync(irPath)) {
   const saved = JSON.parse(fs.readFileSync(irPath, 'utf8'))
   if (saved.sourceHash && saved.sourceHash !== sourceHash) {
-    console.error(`sources drifted from saved IR — run: node codegen.mjs ${xsqlArgs.join(' ')}`)
+    console.error(`sources drifted from saved IR — run: synthigy-gen ${xsqlArgs.join(' ')}`)
     process.exit(1)
+  }
+  if (saved.sourceHash && !['SYNTHIGY_ENDPOINT', 'SYNTHIGY_TOKEN', 'SYNTHIGY_CLIENT_ID'].some(k => process.env[k])) {
+    console.log('ok — sourceHash matches saved IR (offline; set SYNTHIGY_* env for a live describe-diff)')
+    process.exit(0)
   }
 }
 
@@ -200,14 +211,12 @@ if (cached && cached.sourceHash === sourceHash) {
     console.log(cached.sourceHash
       ? 'sources changed since IR pull — refreshing'
       : 'saved IR predates source hashing — refreshing')
-  // The canonical parser owns @namespace/@watch/@returns now — send source as-is.
-  const sourceForDescribe = source
   try {
     const tok = await token()
-    const resp = await fetch(`${ENDPOINT}/data`, {
+    const resp = await fetch(`${endpoint()}/data`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...(tok && { authorization: `Bearer ${tok}` }) },
-      body: JSON.stringify({ operations: [{ op: 'describe', source: sourceForDescribe }] }),
+      body: JSON.stringify({ operations: [{ op: 'describe', sources }] }),
     })
     if (!resp.ok) throw new Error(`describe ${resp.status}: ${await resp.text()}`)
     const body = await resp.json()
@@ -223,7 +232,7 @@ if (cached && cached.sourceHash === sourceHash) {
       throw new Error(`describe returned no operations: ${JSON.stringify(ir).slice(0, 200)}`)
   } catch (e) {
     console.error(cached
-      ? `sources changed since IR pull and describe failed (${e.message}) — start a backend (SYNTHIGY_ENDPOINT) or revert the .xsql edit`
+      ? `sources changed since IR pull and describe failed (${e.message}) — run under \`synthigy exec\` or revert the .xsql edit`
       : `describe failed: ${e.message}`)
     process.exit(1)
   }
@@ -275,7 +284,7 @@ const sdkSrc  = sdkRoot.includes(`${path.sep}node_modules${path.sep}`)
 const ent     = (n) => schema.entities[n] ?? {}
 const visited = new Set()
 
-// The server owns pretty-name derivation (docs/plans/PLAN-SCHEMA-SKINS-PROJECTION.md):
+// The server owns pretty-name derivation:
 // entity/attribute/relation `skins` in the pulled schema are the contract, not a hint.
 // Falls back to the local splitter only for names with no schema entry (op/namespace
 // identifiers, which are snake-authored code with no display label to preserve).
@@ -360,13 +369,11 @@ for (const n of allEntities) nsOf(entityPascal(n))
 // Mutations are Layer-1 territory (schema-derived Entity.sync/stack/delete) —
 // never emitted from XSQL. Skip LOUDLY, never silently.
 const MUTATE_VERBS = new Set(['sync', 'stack', 'delete'])
+const genOps  = []   // generated reads, for @batch member resolution
+const batches = []
 for (const op of ir.operations) {
   if (op.batch) {
-    // The Python and PHP generators emit a batch function; this one does not
-    // yet. Say so — the author declared an operation and would otherwise get
-    // nothing back with no diagnostic.
-    console.warn(`skipped @batch ${op.name} — not generated by the JS codegen yet; ` +
-                 `call the members individually, or exec([op(...), op(...)]) for one round trip`)
+    batches.push(op)
     continue
   }
   if (MUTATE_VERBS.has(op.op)) {
@@ -391,6 +398,7 @@ for (const op of ir.operations) {
   const ret         = op.op === 'get' ? `Promise<${Type} | null>` : `Promise<${Type}[]>`
   const methodName  = camel(op.name)
 
+  genOps.push({ op, Type })
   if (ParamsT) g.typeAliases.push(`export type ${ParamsT} = {\n${pb}\n}`)
   g.typeAliases.push(`export type ${Type} = ${isSql ? plainResultType(op.result) : projectionType(op.entity, op.result.fields)}`)
   if (!isSql) g.typeAliases.push(`export const ${Type}Sel = ${JSON.stringify(fieldsToSel(op.result.fields), null, 2)} as const`)
@@ -406,6 +414,69 @@ for (const op of ir.operations) {
     ? `  watch${pascal(methodName)}(${pArg}): SqlTemplateWatch<${Type}> {\n    return _client.watchSqlTemplate<${Type}>(${xsqlLiteral(op.source)}, ${pPass}, { entities: ${JSON.stringify(Array.isArray(op.watch) ? op.watch : [])}, searchOpts: opts })\n  }`
     : `  watch${pascal(methodName)}(${pArg}): QueryWatch<${Type}> {\n    return _client.watchQuery.xsql<${Type}>(${xsqlLiteral(`@${op.op} ${op.name}\n` + op.source)}, ${pPass}, { entity: ${JSON.stringify(op.entity)}, op: ${JSON.stringify(op.op)}, searchOpts: opts })\n  }`)
 }
+
+// @batch <name>: <m1> <m2> → one exported function, ONE exec round trip. Results
+// are keyed by member name (qualified ns/name when a bare name repeats); a failed
+// member is a SynthigyError VALUE in its slot, never a batch-wide throw. Params
+// are one flat object shared by every member — the Python generator's rules.
+const opIdentity = o => `${(o.namespace ?? o.entity ?? '').toLowerCase()}/${o.name.toLowerCase()}`
+function resolveMember(batchName, ref) {
+  const i  = ref.lastIndexOf('/')
+  const ns = i >= 0 ? ref.slice(0, i).toLowerCase() : null
+  const nm = ref.slice(i + 1).toLowerCase()
+  const matches = genOps.filter(({ op }) => op.name.toLowerCase() === nm &&
+    (ns === null || (op.namespace ?? op.entity ?? '').toLowerCase() === ns))
+  if (!matches.length)
+    throw new Error(`@batch ${batchName} references unknown/ungenerated op ${ref}`)
+  if (ns === null && matches.length > 1)
+    throw new Error(`@batch ${batchName} — ${ref} is ambiguous: ${matches.map(m => opIdentity(m.op)).join(', ')} — qualify the reference`)
+  return matches[0]
+}
+const batchChunks = []
+for (const b of batches) {
+  const members = b.members.map(ref => resolveMember(b.name, ref))
+  const merged = new Map()
+  for (const { op } of members)
+    for (const p of op.params ?? []) {
+      const seen = merged.get(p.name)
+      if (!seen) merged.set(p.name, { ...p })
+      else if (!p.optional) seen.optional = false
+    }
+  const params = [...merged.values()]
+  const names  = members.map(({ op }) => op.name.toLowerCase())
+  const key    = ({ op }) => names.filter(n => n === op.name.toLowerCase()).length > 1 ? opIdentity(op) : op.name
+  const fn     = camel(b.name)
+  const B      = pascal(b.name)
+  const pb     = paramsBody(params)
+  const allOpt = params.every(p => p.optional)
+  const lines  = []
+  if (pb) lines.push(`export type ${B}BatchParams = {\n${pb}\n}`)
+  lines.push(`export type ${B}Batch = {\n${members.map(m =>
+    `  ${JSON.stringify(key(m))}: ${m.op.op === 'get' ? `${m.Type} | null` : `${m.Type}[]`} | SynthigyError`).join('\n')}\n}`)
+  const ops = members.map(({ op }) => op.op === 'sql-template'
+    ? `    op.sqlTemplate(${xsqlLiteral(op.source)}, p),`
+    : `    op.query(${xsqlLiteral(`@${op.op} ${op.name}\n` + op.source)}, p, ${JSON.stringify(op.op)}),`)
+  const res = members.map((m, i) => `    ${JSON.stringify(key(m))}: _batchResult(r[${i}], ${JSON.stringify(m.op.op)}) as ${B}Batch[${JSON.stringify(key(m))}],`)
+  lines.push(`/**
+ * Batch: ${b.members.join(' + ')} — ONE request. Results are keyed by member; a
+ * failed member is a SynthigyError value in its slot, not a throw. Params are one
+ * object shared by every member.
+ */
+export async function ${fn}(${pb ? `params${allOpt ? '?' : ''}: ${B}BatchParams, ` : ''}opts?: ExecOpts): Promise<${B}Batch> {
+  const p = ${pb ? 'params ?? {}' : '{}'}
+  const r = await _client.exec([
+${ops.join('\n')}
+  ], opts)
+  return {
+${res.join('\n')}
+  }
+}`)
+  batchChunks.push(lines.join('\n\n'))
+}
+if (batchChunks.length) batchChunks.unshift(`function _batchResult(r: OperationResult, verb: string): unknown {
+  if (!r?.ok) return new SynthigyError(r?.error?.message ?? 'operation failed', r?.error?.code ?? 'OPERATION_FAILED')
+  return verb === 'get' ? (r.data ?? null) : (r.data ?? [])
+}`)
 
 // Emit one chunk per namespace: projection types + the object (reads + writes).
 const nsChunks = []
@@ -472,8 +543,8 @@ const aliasImports = allEntities.flatMap(n =>
 ).join(', ')
 const inputNames = xsqlPaths.map(p => path.basename(p)).join(', ')
 const OPS_HDR_COMMENT = `// AUTO-GENERATED from ${inputNames}. Do not edit.\n`
-const OPS_HDR_CODE = `import type { SynthigyClient, ClientConfig, ExecOpts, WriteOpts, QueryWatch, SqlTemplateWatch } from "${sdkSrc}"
-import { connect } from "${sdkSrc}"
+const OPS_HDR_CODE = `import type { SynthigyClient, ClientConfig, ExecOpts, WriteOpts, QueryWatch, SqlTemplateWatch${batchChunks.length ? ', OperationResult' : ''} } from "${sdkSrc}"
+import { connect${batchChunks.length ? ', op, SynthigyError' : ''} } from "${sdkSrc}"
 import type { ${aliasImports} } from "./schema.js"
 
 /** What a write answers by default — writes are silent unless \`returning\`. */
@@ -490,7 +561,7 @@ let _client: SynthigyClient
  * points every generated method at it. One process, one client, one token
  * cache, one SSE. Reconnect by calling again (destroys the previous client).
  */
-export function configure(config: ClientConfig): void {
+export function configure(config: ClientConfig = {}): void {
   _client = connect(${flags.keys === 'camel' ? '{ ...config, keyFormat: \'camel\' }' : 'config'})
 }
 
@@ -509,9 +580,8 @@ const _toSnake = (v: unknown): unknown => {
 const SCHEMA_HDR = `// AUTO-GENERATED — entity types from /schema ${schema.version ?? ''}. Do not edit.\n`
 
 fs.mkdirSync(outDir, { recursive: true })
-// The printer drops the detached top-of-file comment, so prepend it after formatting.
-fs.writeFileSync(path.join(outDir, 'schema.ts'), SCHEMA_HDR + formatTs(schemaChunks.join('\n\n'), 'schema.ts'))
-fs.writeFileSync(path.join(outDir, 'ops.ts'),    OPS_HDR_COMMENT + formatTs(OPS_HDR_CODE + nsChunks.join('\n\n'), 'ops.ts'))
+fs.writeFileSync(path.join(outDir, 'schema.ts'), SCHEMA_HDR + schemaChunks.join('\n\n') + '\n')
+fs.writeFileSync(path.join(outDir, 'ops.ts'),    OPS_HDR_COMMENT + OPS_HDR_CODE + [...nsChunks, ...batchChunks].join('\n\n') + '\n')
 
 // Gate, not a builder: VALIDATE the generated TS and FAIL LOUD if it doesn't
 // type-check — never ship broken/stale output silently (the old emit-and-swallow
@@ -536,7 +606,7 @@ const tscBin = (() => {
 
 // `--ignoreConfig` needs TypeScript 6. On 5.x the flag is itself an error, and
 // naming files explicitly already makes tsc skip tsconfig.json, so it is left off.
-const tscMajor = Number.parseInt(ts.version ?? '0', 10) || 0
+const tscMajor = Number.parseInt(tsVersion ?? '0', 10) || 0
 if (tscBin) {
   try {
     execFileSync(tscBin, [
@@ -552,9 +622,9 @@ if (tscBin) {
     process.exit(1)
   }
 } else {
-  process.stderr.write('codegen: tsc not found — skipping the type-check gate.\n')
+  process.stderr.write('codegen: tsc not found — skipping the type-check gate (npm install -D typescript).\n')
 }
 const flagSummary = [flags.keys !== 'snake' && `keys=${flags.keys}`, !flags.writes && 'no-writes'].filter(Boolean).join(' ')
 const opCount = ir.operations.filter(o => !o.batch).length
 const inputSummary = xsqlPaths.map(p => path.basename(p)).join(' + ')
-console.log(`${inputSummary} → ${allEntities.length} entities (full model), ${Object.keys(nsMap).length} namespaces, ${opCount} ops${flagSummary ? ` [${flagSummary}]` : ''} → ${outDir}`)
+console.log(`${inputSummary} → ${allEntities.length} entities (full model), ${Object.keys(nsMap).length} namespaces, ${opCount} ops${batches.length ? `, ${batches.length} batches` : ''}${flagSummary ? ` [${flagSummary}]` : ''} → ${outDir}`)

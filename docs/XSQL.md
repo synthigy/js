@@ -8,7 +8,7 @@ You can send XSQL two ways:
 
 - **Inline** — paste a query string into `client.query(...)`.
 - **Compiled** — keep queries in `.xsql` files and generate typed methods
-  ([codegen](./WATCH.md#codegen)).
+  ([code generation](../README.md#code-generation)).
 
 ## A query is a shape
 
@@ -75,7 +75,7 @@ Result:
 
 ```json
 { "title": "…", "_count": { "ratings": 42, "actors": 7 },
-  "_agg": { "ratings": { "avg": { "value": 4.3 } } } }
+  "_agg": { "ratings": { "value": { "avg": 4.3 } } } }
 ```
 
 ## Relations: inner vs left
