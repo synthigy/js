@@ -267,6 +267,52 @@ describe('error handling', () => {
     }
   })
 
+  it('classifies permission denials as iam', () => {
+    for (const code of ['RELATION_FORBIDDEN', 'ATTRIBUTE_FORBIDDEN', 'ROW_FORBIDDEN',
+                        'CREATE_FORBIDDEN', 'DELETE_FORBIDDEN', 'SLOT_OCCUPIED']) {
+      const e = new SynthigyError('x', code)
+      assert.deepEqual([e.category, e.retryable], ['iam', false], code)
+    }
+  })
+
+  it('retries an unknown code only when the server marks it retryable', async () => {
+    const client = createClient({ endpoint: 'http://localhost', token: 't' })
+    const failWith = (error) => mockFetch.mock.mockImplementation(async () =>
+      mockResponse(200, { results: [{ ok: false, error: { message: 'x', ...error } }] }))
+
+    assert.equal(new SynthigyError('x', 'SOME_FUTURE_CODE').category, 'internal')
+    assert.equal(new SynthigyError('x', 'SOME_FUTURE_CODE').retryable, false)
+    failWith({ code: 'DB_UNAVAILABLE', retryable: true })
+    await assert.rejects(client.search('user', {}, { name: null }), (e) => e.retryable === true)
+    failWith({ code: 'DB_UNAVAILABLE' })
+    await assert.rejects(client.search('user', {}, { name: null }), (e) => e.retryable === false)
+    failWith({ code: 'RELATION_FORBIDDEN', relation: 'r1' })
+    await assert.rejects(client.search('user', {}, { name: null }),
+      (e) => e.code === 'RELATION_FORBIDDEN' && e.category === 'iam' && e.retryable === false)
+  })
+
+  it('types a refused token mint', async () => {
+    for (const [status, body, code, message] of [
+      [401, '{"error":"invalid_client","error_description":"Client authentication failed"}', 'INVALID_CLIENT',
+        'Token request refused (401): invalid_client — Client authentication failed'],
+      [400, '{"error":"invalid_scope"}', 'INVALID_SCOPE', 'Token request refused (400): invalid_scope'],
+      [400, '{"error":"invalid_target","error_description":"Client is not authorized for audience x"}', 'INVALID_AUDIENCE',
+        'Token request refused (400): invalid_target — Client is not authorized for audience x'],
+      [400, '{"error":"unauthorized_client"}', 'UNAUTHORIZED', 'Token request refused (400): unauthorized_client'],
+      [502, 'Bad Gateway', 'UNAUTHORIZED', 'Token request failed (502): Bad Gateway'],
+    ]) {
+      mockFetch.mock.mockImplementation(async () => ({ ok: false, status, text: async () => body }))
+      const client = createClient({ endpoint: 'http://localhost', clientId: 'id', clientSecret: 'wrong' })
+      await assert.rejects(client.search('user', {}, { name: null }), (e) => {
+        assert.ok(e instanceof SynthigyError, code)
+        assert.deepEqual([e.code, e.category, e.retryable, e.status, e.message],
+                         [code, 'auth', false, status, message])
+        assert.equal(e.hint !== undefined, code === 'INVALID_CLIENT', `${code} hint`)
+        return true
+      })
+    }
+  })
+
   it('throws SynthigyError on 401', async () => {
     const client = createClient({ endpoint: 'http://localhost', token: 'bad' })
 
@@ -1701,6 +1747,29 @@ describe('login', () => {
     const store = new MemoryLoginStore({ ttlMs: 0 })
     store.put('s', { codeVerifier: 'v', nonce: 'n', returnTo: '/', createdAt: Date.now() - 1 })
     assert.equal(store.take('s'), null)
+  })
+
+  it('keeps a 9-minute login by default — the server allows 8', () => {
+    const store = new MemoryLoginStore()
+    store.put('s', { codeVerifier: 'v', nonce: 'n', returnTo: '/', createdAt: Date.now() - 9 * 60_000 })
+    assert.notEqual(store.take('s'), null)
+  })
+
+  it('refuses a login older than 10 minutes even when the store kept it', async () => {
+    mockFetch.mock.resetCalls()
+    const kept = new Map()
+    const forever = { put(state, login) { kept.set(state, login) }, take(state) { return kept.get(state) ?? null } }
+    const old = { codeVerifier: 'v', nonce: 'n', returnTo: '/back', createdAt: Date.now() - 10 * 60_000 - 1 }
+    forever.put('done', old)
+    forever.put('cancelled', old)
+    const client = confidential({ loginStore: forever })
+
+    await assert.rejects(
+      () => client.login.complete({ code: 'c', state: 'done', redirectUri: 'http://app/cb' }),
+      (err) => err instanceof SynthigyError && err.code === 'LOGIN_STATE_UNKNOWN'
+    )
+    assert.equal(await client.login.cancel('cancelled'), null)
+    assert.equal(mockFetch.mock.callCount(), 0, 'an expired login never reaches the IdP')
   })
 })
 

@@ -1,3 +1,5 @@
+import fs from 'node:fs'
+
 // Shared codegen primitives for the TS emitters — one home for the scalar-type
 // map + casing so the read and write emitters can't drift apart.
 
@@ -28,3 +30,25 @@ export const camel = (s) => { const p = pascal(s); return p[0].toLowerCase() + p
 export const snake = (s) => words(s).join('_')
 // kebab wire keys aren't valid TS identifiers → keep verbatim, quote when needed.
 export const tsKey = (k) => (/^[A-Za-z_$][\w$]*$/.test(k) ? k : JSON.stringify(k))
+
+// One line on `write` when the schema's deploy stamp is older than the model at
+// /.well-known/synthigy. Silent on any failure: generation stays offline-capable.
+export async function warnStaleSchema(endpoint, schemaPath, write = (s) => console.error(s)) {
+  if (!endpoint || !fs.existsSync(schemaPath)) return
+  let local, remote
+  try {
+    local = JSON.parse(fs.readFileSync(schemaPath, 'utf8')).datasets ?? {}
+    const r = await fetch(`${endpoint.replace(/\/$/, '')}/.well-known/synthigy`,
+      { signal: AbortSignal.timeout(2000) })
+    if (!r.ok) return
+    remote = (await r.json()).datasets ?? {}
+  } catch {
+    return
+  }
+  const instant = (s) => (Number.isNaN(Date.parse(s)) ? s : Date.parse(s))
+  const changed = Object.keys(remote).filter((id) => instant(local[id]?.['deployed-at']) !== instant(remote[id]))
+    .concat(Object.keys(local).filter((id) => !(id in remote)))
+  if (changed.length) {
+    write(`warning: ${schemaPath} is stale against ${endpoint} (${changed.length} datasets changed since the pull) — re-run with --pull`)
+  }
+}

@@ -415,10 +415,7 @@ class TokenManager {
       body: params,
     })
 
-    if (!resp.ok) {
-      const text = await resp.text()
-      throw new Error(`Token request failed (${resp.status}): ${text}`)
-    }
+    if (!resp.ok) throw _tokenRefusal(resp.status, await resp.text())
 
     const data = await resp.json()
     this._tokens.set(key, {
@@ -432,6 +429,28 @@ class TokenManager {
   clear() {
     this._tokens.clear()
   }
+}
+
+/** RFC 6749 §5.2 / RFC 8707 refusals with their own code; any other refusal is UNAUTHORIZED. */
+const REFUSAL_CODES = {
+  invalid_client: 'INVALID_CLIENT',
+  invalid_scope:  'INVALID_SCOPE',
+  invalid_target: 'INVALID_AUDIENCE',
+}
+
+function _tokenRefusal(status, text) {
+  let oauth = null
+  try { oauth = JSON.parse(text) } catch {}
+  if (typeof oauth?.error !== 'string' || oauth.error === '') {
+    return new SynthigyError(`Token request failed (${status}): ${text}`, 'UNAUTHORIZED', undefined, { status })
+  }
+  const code = Object.hasOwn(REFUSAL_CODES, oauth.error) ? REFUSAL_CODES[oauth.error] : 'UNAUTHORIZED'
+  const desc = typeof oauth.error_description === 'string' && oauth.error_description !== ''
+    ? ` — ${oauth.error_description}` : ''
+  return new SynthigyError(`Token request refused (${status}): ${oauth.error}${desc}`, code, oauth, {
+    status,
+    hint: code === 'INVALID_CLIENT' ? 'check the client id and secret, and that the client is active' : undefined,
+  })
 }
 
 // ============================================================================
@@ -665,6 +684,10 @@ const ERROR_CATEGORIES = {
   LOGIN_NONCE_MISMATCH:       'auth',
   LOGIN_EXCHANGE_FAILED:      'auth',
   SILENT_TIMEOUT:             'auth',
+  USERINFO_SUB_MISMATCH:      'auth',
+  INVALID_CLIENT:             'auth',
+  INVALID_SCOPE:              'auth',
+  INVALID_AUDIENCE:           'auth',
   // OAuth error codes the IdP redirects back with (RFC 6749 4.1.2.1, OIDC 3.1.2.6)
   access_denied:              'auth',
   login_required:             'auth',
@@ -676,6 +699,12 @@ const ERROR_CATEGORIES = {
   ENTITY_FORBIDDEN:           'iam',
   ENTITY_NOT_READABLE:        'iam',
   RELATION_NOT_READABLE:      'iam',
+  RELATION_FORBIDDEN:         'iam',
+  ATTRIBUTE_FORBIDDEN:        'iam',
+  ROW_FORBIDDEN:              'iam',
+  CREATE_FORBIDDEN:           'iam',
+  DELETE_FORBIDDEN:           'iam',
+  SLOT_OCCUPIED:              'iam',
   // validation
   INVALID_BODY:               'validation',
   NO_OPERATIONS:              'validation',
@@ -732,11 +761,14 @@ const ERROR_CATEGORIES = {
   INTERNAL_ERROR:             'internal',
   OPERATION_ERROR:            'internal',
   HTTP_ERROR:                 'internal',
+  OPERATION_FAILED:           'internal',
+  USERINFO_FAILED:            'internal',
 }
 
 /**
  * Codes whose category is automatically retryable. Any other code is
- * one-shot: the caller must fix something before retrying.
+ * one-shot: the caller must fix something before retrying. A code missing
+ * from ERROR_CATEGORIES is retryable only when the server marks it so.
  */
 const RETRYABLE_CATEGORIES = new Set(['network', 'rate_limit', 'internal'])
 
@@ -777,7 +809,9 @@ export class SynthigyError extends Error {
     this.name      = 'SynthigyError'
     this.code      = code
     this.category  = ERROR_CATEGORIES[code] ?? 'internal'
-    this.retryable = RETRYABLE_CATEGORIES.has(this.category)
+    this.retryable = typeof extras?.retryable === 'boolean'
+      ? extras.retryable
+      : Object.hasOwn(ERROR_CATEGORIES, code) && RETRYABLE_CATEGORIES.has(this.category)
     if (details !== undefined) this.details = details
     if (extras) {
       if (extras.hint        !== undefined) this.hint        = extras.hint
@@ -833,6 +867,7 @@ function _errorFromServer(err, status, requestId) {
     start:       err.start,
     end:         err.end,
     diagnostics: err.diagnostics,
+    retryable:   err.retryable,
     requestId,
     status,
   })

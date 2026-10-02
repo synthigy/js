@@ -11,7 +11,7 @@ import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { TS, tsScalar, pascal, camel } from './lib.mjs'
+import { TS, tsScalar, pascal, camel, warnStaleSchema } from './lib.mjs'
 import { PLATFORM_AUDIENCE } from '../src/index.js'
 
 let tsVersion = null
@@ -140,6 +140,8 @@ if (!flags.schemaOverride && (flags.pull || !fs.existsSync(schemaPath))) {
   execFileSync(process.execPath,
     [path.join(here, 'pull.mjs'), endpoint(), schemaPath],
     { stdio: 'inherit', env: process.env })
+} else {
+  await warnStaleSchema(ENDPOINT, schemaPath)
 }
 
 if (!fs.existsSync(schemaPath)) {

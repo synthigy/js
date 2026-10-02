@@ -13,7 +13,8 @@
 
 const PKCE_VERIFIER_BYTES = 32
 const STATE_BYTES = 24
-const DEFAULT_TTL_MS = 5 * 60_000
+// must exceed the server's 8-minute login window, or slow logins fail LOGIN_STATE_UNKNOWN
+const LOGIN_TTL_MS = 10 * 60_000
 
 function base64urlEncode(bytes) {
   let binary = ''
@@ -69,7 +70,7 @@ export function decodeJwtPayload(jwt) {
  * holds their sessions (Redis, Postgres, a signed cookie).
  */
 export class MemoryLoginStore {
-  constructor({ ttlMs = DEFAULT_TTL_MS } = {}) {
+  constructor({ ttlMs = LOGIN_TTL_MS } = {}) {
     this._ttlMs = ttlMs
     this._pending = new Map()
   }
@@ -127,6 +128,12 @@ export function createLoginApi(client, { SynthigyError }) {
     }
   }
 
+  // the store's own expiry is not trusted: one that never expires would accept a login of any age
+  const takePending = async (state) => {
+    const pending = state ? await client._loginStore.take(state) : null
+    return pending && pending.createdAt > Date.now() - LOGIN_TTL_MS ? pending : null
+  }
+
   return {
     /**
      * Begin a login: returns the URL to redirect the browser to, and stashes
@@ -167,7 +174,7 @@ export function createLoginApi(client, { SynthigyError }) {
      */
     async complete({ code, state, redirectUri } = {}) {
       requireConfidential()
-      const pending = state ? await client._loginStore.take(state) : null
+      const pending = await takePending(state)
       if (!pending) {
         throw new SynthigyError(
           'unknown or expired login state: the store never saw it, it was ' +
@@ -230,7 +237,7 @@ export function createLoginApi(client, { SynthigyError }) {
      * here rather than a throw.
      */
     async cancel(state) {
-      const pending = state ? await client._loginStore.take(state) : null
+      const pending = await takePending(state)
       return pending ? { returnTo: pending.returnTo } : null
     },
   }

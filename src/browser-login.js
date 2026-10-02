@@ -14,7 +14,8 @@
 import { pkce, decodeJwtPayload } from './login.js'
 
 const PENDING_PREFIX = 'synthigy.login:'
-const PENDING_TTL_MS = 5 * 60_000
+// must exceed the server's 8-minute login window, or slow logins fail LOGIN_STATE_UNKNOWN
+const PENDING_TTL_MS = 10 * 60_000
 const MESSAGE_SOURCE = 'synthigy-login'
 
 function randomToken(bytes) {

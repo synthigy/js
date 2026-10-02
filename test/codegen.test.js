@@ -30,3 +30,28 @@ describe('codegen', () => {
     assert.match(ops, /import \{ connect, op, SynthigyError \} from/)
   })
 })
+
+describe('warnStaleSchema', () => {
+  it('warns only when the deploy stamp moved', async () => {
+    const { createServer } = await import('node:http')
+    const { writeFileSync } = await import('node:fs')
+    const { warnStaleSchema } = await import('../codegen/lib.mjs')
+    const srv = createServer((_, res) => {
+      res.setHeader('content-type', 'application/json')
+      res.end('{"datasets":{"A":"2026-09-15T09:47:15.698+02:00","B":"2026-10-01T00:00:00Z"}}')
+    })
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r))
+    const endpoint = `http://127.0.0.1:${srv.address().port}`
+    const schema = path.join(mkdtempSync(path.join(tmpdir(), 'synthigy-stale-')), 'schema.json')
+    const run = async (ep) => { const out = []; await warnStaleSchema(ep, schema, (s) => out.push(s)); return out.join('') }
+    try {
+      writeFileSync(schema, '{"datasets":{"A":{"deployed-at":"2026-09-15T07:47:15.698Z"},"B":{"deployed-at":"2026-10-01T00:00:00Z"}}}')
+      assert.equal(await run(endpoint), '')
+      writeFileSync(schema, '{"datasets":{"A":{"deployed-at":"2026-09-15T07:47:15.698Z"}}}')
+      assert.match(await run(endpoint), /stale/)
+      assert.equal(await run(undefined), '')
+    } finally {
+      srv.close()
+    }
+  })
+})

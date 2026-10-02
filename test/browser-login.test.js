@@ -120,6 +120,23 @@ describe('createBrowserLogin', () => {
     assert.equal(q.code_challenge, b64url(createHash('sha256').update(pending.codeVerifier).digest()))
   })
 
+  for (const [ageMs, kept] of [[9 * 60_000, true], [10 * 60_000 + 1000, false]]) {
+    it(`a ${Math.floor(ageMs / 60_000)}-minute-old pending login is ${kept ? 'kept — the server allows 8' : 'refused'}`, async () => {
+      const server = nonceEchoingServer()
+      const login = loginWith(server.fetch)
+      await login.start()
+      const q = new URL(env.assigned[0]).searchParams
+      server.nonces.push(q.get('nonce'))
+      const key = `synthigy.login:${q.get('state')}`
+      env.storage.setItem(key, JSON.stringify({ ...JSON.parse(env.storage.getItem(key)), createdAt: Date.now() - ageMs }))
+      installBrowserKeepingStore(`${CB}?code=the-code&state=${q.get('state')}`)
+
+      if (kept) assert.equal((await login.complete()).user.xid, 'x-alice')
+      else await assert.rejects(login.complete(), (e) => e.code === 'LOGIN_STATE_UNKNOWN')
+      login.removeUser()
+    })
+  }
+
   it('complete exchanges as a public client and returns the user; state is one-shot', async () => {
     const server = nonceEchoingServer()
     const login = loginWith(server.fetch)
