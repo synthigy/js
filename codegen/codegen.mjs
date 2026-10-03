@@ -2,7 +2,6 @@
 // Unified codegen tool:
 //   node codegen.mjs <xsql...> [outDir]     — describe + gen TS (saves ops.ir.json)
 //   node codegen.mjs check <xsql...>         — re-describe, diff, exit 1 on drift
-//   node codegen.mjs pull [endpoint] [out]   — pull schema.json (wraps pull.mjs)
 //
 // Config via env: SYNTHIGY_ENDPOINT, SYNTHIGY_CLIENT_ID, SYNTHIGY_CLIENT_SECRET
 
@@ -29,10 +28,9 @@ synthigy-codegen — generate TypeScript types from XSQL operations
 Usage:
   codegen.mjs [flags] <a.xsql> [b.xsql ...] [outDir]   generate TS from one or more xsql files
   codegen.mjs check   [flags] <a.xsql> [b.xsql ...]    re-describe, diff IR, exit 1 on drift
-  codegen.mjs pull    [endpoint] [out]                  pull schema.json only
 
 Flags:
-  --pull               force schema refresh before generating
+  --pull               refresh schema.json beside the .xsql before generating
   --keys snake|camel   field key casing in generated types (default: snake)
   --no-writes          omit sync / stack / delete methods
   --schema <path>      explicit schema.json path (skips auto-pull)
@@ -47,7 +45,6 @@ Examples:
   node codegen.mjs movies.xsql src/generated/        first run auto-pulls schema
   node codegen.mjs --pull movies.xsql src/generated/ force schema refresh + generate
   node codegen.mjs check movies.xsql                 CI drift check
-  node codegen.mjs pull http://localhost:7887         pull schema only
 `.trim())
   process.exit(0)
 }
@@ -71,13 +68,6 @@ if (!VALID_KEYS.has(flags.keys)) {
 }
 
 const checkMode = pos[0] === 'check'
-const pullMode  = pos[0] === 'pull'
-
-if (pullMode) {
-  execFileSync(process.execPath, [path.join(here, 'pull.mjs'), ...pos.slice(1)],
-    { stdio: 'inherit', env: process.env })
-  process.exit(0)
-}
 
 // Positionals: last non-.xsql arg is outDir; everything before it (files or dirs)
 // is input. check mode has no outDir — every positional is input.
@@ -90,7 +80,6 @@ const xsqlArgs = hasExplicitOut ? rawPos.slice(0, -1) : rawPos
 if (!xsqlArgs.length) {
   console.error('usage: node codegen.mjs [flags] <file.xsql|dir> [...] [outDir]   (dirs searched recursively)')
   console.error('       node codegen.mjs check <file.xsql|dir> [...]')
-  console.error('       node codegen.mjs pull [endpoint] [schema.json]')
   console.error('flags: --pull                force schema refresh')
   console.error('       --keys snake|camel    field casing (default: snake)')
   console.error('       --no-writes           omit sync/stack/delete methods')
@@ -99,6 +88,8 @@ if (!xsqlArgs.length) {
 }
 
 const isDir = p => fs.existsSync(p) && fs.statSync(p).isDirectory()
+const missing = xsqlArgs.filter(a => !fs.existsSync(path.resolve(a)))
+if (missing.length) { console.error(`no such .xsql file or directory: ${missing.join(', ')}`); process.exit(1) }
 const xsqlPaths = xsqlArgs.flatMap(a => {
   const p = path.resolve(a)
   if (isDir(p))

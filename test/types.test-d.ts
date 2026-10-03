@@ -81,6 +81,18 @@ async function loginContract() {
 }
 void loginContract
 
+// error fields the runtime sets are typed — branch on them without a cast
+function errorContract(e: unknown) {
+  if (e instanceof sdk.SynthigyError) {
+    e.retryable satisfies boolean
+    e.category satisfies 'auth' | 'iam' | 'validation' | 'not_found' | 'conflict' | 'rate_limit' | 'network' | 'internal'
+    e.hint satisfies string | undefined
+    e.status satisfies number | undefined
+    e.requestId satisfies string | undefined
+  }
+}
+void errorContract
+
 // sync/stack carry one record OR a list (bulk import), on the client, the
 // module-level mirrors and the batch op builders alike.
 async function bulkWriteContract(c: SynthigyClient) {

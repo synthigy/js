@@ -2004,6 +2004,19 @@ class SynthigyClient {
   }
 
   /**
+   * Who a call runs as, after `actingAs`: xid, name, active, superuser, roles,
+   * groups, and `client` ({ id, trusted }) — trusted means it may act as users.
+   *
+   * @param {Object} [opts] - Options ({ actingAs })
+   * @returns {Promise<Object>}
+   */
+  async whoami(opts) {
+    const [result] = await this.exec([{ op: 'whoami' }], opts)
+    if (!result.ok) throw _errorFromServer(result.error, undefined, result._requestId)
+    return result.data
+  }
+
+  /**
    * Deploy a dataset version from a modeler export. Pass the export file's
    * contents verbatim — the server decodes it. Requires `dataset:deploy`.
    *
@@ -2561,6 +2574,7 @@ export const op = {
   query:       (xsql, params, verb = 'search') => ({ op: 'xsql', xsql: xsqlDocument(xsql, verb), ...(params !== undefined && { params }) }),
   deployedModel: () => ({ op: 'deployed-model' }),
   runtimeModel: () => ({ op: 'runtime-model' }),
+  whoami:       ()                       => ({ op: 'whoami' }),
   deploy:       (exportContents)         => ({ op: 'deploy', data: exportContents }),
   destroy:      (datasetXid)             => ({ op: 'delete', entity: 'dataset', data: { xid: datasetXid } }),
 }
@@ -2692,6 +2706,7 @@ export const onboardComplete = (...a) => _dflt().onboardComplete(...a)
 export const deploy        = (...a) => _dflt().deploy(...a)
 export const destroy       = (...a) => _dflt().destroy(...a)
 export const deployedModel = (...a) => _dflt().deployedModel(...a)
+export const whoami        = (...a) => _dflt().whoami(...a)
 export const runtimeModel  = (...a) => _dflt().runtimeModel(...a)
 export const token         = (...a) => _dflt().token(...a)
 export const history       = () => _dflt().history

@@ -3,6 +3,28 @@
 All notable changes to `@synthigy/sdk`. Follows [semver](https://semver.org).
 Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.2.2
+
+### Added
+- **`client.whoami({ actingAs })`** (and `whoami()`, `op.whoami()`, the
+  `WhoAmI` type) — who a call runs as: xid, name, active, superuser, roles
+  (group-conferred included), groups, and `client` `{ id, trusted }`, where
+  `trusted` means this client may act as users. Needs engine v0.2.11 or newer.
+
+### Removed
+- **`synthigy-gen pull`.** Without an output path it wrote `schema.json` into
+  the SDK's own package folder, where nothing reads it. `synthigy-gen --pull`
+  refreshes the `schema.json` beside the `.xsql`; `synthigy schema pull` writes
+  the same `xsql/schema.json`.
+
+### Fixed
+- **`SynthigyError` typings declare what the runtime sets** — `category`,
+  `retryable`, `hint`, `status`, `requestId`, the source positions and the
+  rest. TypeScript code could read them only through a cast.
+- An input path that doesn't exist is an error before anything is pulled. The
+  old `synthigy-gen pull <endpoint>` would otherwise pull a schema into the
+  working directory and then fail on a file named `pull`.
+
 ## 0.2.1
 
 ### Fixed

@@ -60,7 +60,9 @@ Run it with `synthigy exec -- node hello.ts`.
   `watchSqlTemplate` for live analytics, `watch` for raw record events.
 
 - **`actingAs` per call.** Every read and write can run as a specific user, with
-  IAM / RBAC / row-level security enforced *server-side*. Tokens never have to
+  IAM / RBAC / row-level security enforced *server-side*; `whoami({ actingAs })`
+  shows who a call runs as — roles, superuser, whether this client may act as
+  users. Tokens never have to
   reach the browser. `client.login` runs the OIDC authorization-code + PKCE
   exchange for your BFF and leaves sessions to you; `createBrowserLogin` does
   the same for a browser app, as a public client with silent renew and tokens

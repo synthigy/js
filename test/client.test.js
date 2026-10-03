@@ -769,6 +769,26 @@ describe('client credentials', () => {
   })
 })
 
+describe('whoami', () => {
+  beforeEach(() => mockFetch.mock.resetCalls())
+
+  it('sends op whoami with acting_as and returns the identity', async () => {
+    const me = { xid: 'x-bgates', name: 'bgates', active: true, superuser: false,
+                 roles: ['Viewer'], groups: [], client: { id: 'viewer', trusted: true } }
+    let sent
+    mockFetch.mock.mockImplementation(async (_url, opts) => {
+      sent = JSON.parse(opts.body)
+      return mockResponse(200, { results: [{ ok: true, data: me }] })
+    })
+    const client = createClient({ endpoint: 'http://localhost', token: 't' })
+
+    assert.deepEqual(await client.whoami({ actingAs: 'x-bgates' }), me)
+    assert.deepEqual(sent.operations, [{ op: 'whoami' }])
+    assert.equal(sent.acting_as, 'x-bgates')
+    assert.deepEqual(op.whoami(), { op: 'whoami' })
+  })
+})
+
 describe('get', () => {
   beforeEach(() => mockFetch.mock.resetCalls())
 

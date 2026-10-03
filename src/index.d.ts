@@ -324,11 +324,50 @@ export type SynthigyErrorCode =
   | 'HTTP_ERROR' | 'OPERATION_ERROR' | 'INTERNAL_ERROR'
   | (string & {})
 
+/** `whoami()` — the identity a call runs as. `client` is null in-process (no OAuth client). */
+export interface WhoAmI {
+  xid: string | null
+  name: string | null
+  active: boolean
+  superuser: boolean
+  roles: string[]
+  groups: string[]
+  /** `trusted`: this client may act as users (confidential, active, flagged trusted). */
+  client: { id: string; trusted: boolean } | null
+}
+
+export type SynthigyErrorCategory =
+  | 'auth' | 'iam' | 'validation' | 'not_found'
+  | 'conflict' | 'rate_limit' | 'network' | 'internal'
+
+/** 1-based source position (XSQL_PARSE_ERROR, TEMPLATE_*). */
+export interface SourcePosition { line: number; col: number }
+
 export class SynthigyError extends Error {
   name: 'SynthigyError'
   code: SynthigyErrorCode
+  category: SynthigyErrorCategory
+  /** True for known network/rate_limit/internal codes, or when the server marked the error retryable. */
+  retryable: boolean
   details?: unknown
-  constructor(message: string, code: string, details?: unknown)
+  hint?: string
+  available?: string[]
+  path?: unknown
+  entity?: string
+  relation?: string
+  operator?: string
+  requestId?: string
+  status?: number
+  line?: number
+  col?: number
+  start?: SourcePosition
+  end?: SourcePosition
+  diagnostics?: unknown[]
+  constructor(message: string, code: string, details?: unknown, extras?: {
+    hint?: string; available?: string[]; path?: unknown; entity?: string; relation?: string
+    operator?: string; requestId?: string; status?: number; retryable?: boolean
+    line?: number; col?: number; start?: SourcePosition; end?: SourcePosition; diagnostics?: unknown[]
+  })
 }
 
 // ============================================================================
@@ -789,6 +828,9 @@ export class SynthigyClient {
    */
   deployedModel(opts?: ExecOpts): Promise<Record<string, unknown>>
 
+  /** Who a call runs as, after `actingAs` — roles, superuser, and whether this client may act as users. */
+  whoami(opts?: ExecOpts): Promise<WhoAmI>
+
   /**
    * Deploy a dataset version from a modeler export — pass the export file's
    * contents verbatim, the server decodes it. Requires `dataset:deploy`.
@@ -1210,6 +1252,7 @@ export const op: {
   query(xsql: string, params?: Record<string, unknown>, verb?: string): Operation
   deployedModel(): Operation
   runtimeModel(): Operation
+  whoami(): Operation
   deploy(exportContents: string): Operation
   destroy(datasetXid: string): Operation
 }
@@ -1291,6 +1334,7 @@ export const onboardComplete: SynthigyClient['onboardComplete']
 export const deploy: SynthigyClient['deploy']
 export const destroy: SynthigyClient['destroy']
 export const deployedModel: SynthigyClient['deployedModel']
+export const whoami: SynthigyClient['whoami']
 export const runtimeModel: SynthigyClient['runtimeModel']
 export const token: SynthigyClient['token']
 export function history(): SynthigyClient['history']

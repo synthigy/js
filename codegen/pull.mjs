@@ -21,8 +21,9 @@ import path from 'node:path'
 import { createClient } from '../src/index.js'
 
 const endpoint = process.argv[2] ?? process.env.SYNTHIGY_ENDPOINT
-if (!endpoint) {
-  console.error('usage: node pull.mjs <endpoint>   (or set SYNTHIGY_ENDPOINT)')
+const out = process.argv[3]
+if (!endpoint || !out) {
+  console.error('usage: node pull.mjs <endpoint> <schema.json>')
   process.exit(1)
 }
 
@@ -41,8 +42,7 @@ if (SYNTHIGY_CLIENT_ID && SYNTHIGY_CLIENT_SECRET) {
   config.token = SYNTHIGY_TOKEN ?? '' // '' = authless (bare server)
 }
 
-const here = path.dirname(new URL(import.meta.url).pathname)
-const outPath = process.argv[3] ? path.resolve(process.argv[3]) : path.join(here, 'schema.json')
+const outPath = path.resolve(out)
 
 const client = createClient(config)
 const schema = await client.schema()
