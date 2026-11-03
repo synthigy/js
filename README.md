@@ -87,7 +87,7 @@ synthigy up
 ```
 
 The first `up` prints a `/setup` link; open it and pick a database. (No
-browser? `synthigy up --db sqlite` skips the wizard.) Already have a server?
+browser? `synthigy up --bundle sqlite` skips the wizard.) Already have a server?
 Skip this step.
 
 **2. Deploy your data model** in the modeler (or from code with `client.deploy()`, as a
@@ -168,6 +168,7 @@ repo.
 | Doc | What's in it |
 |---|---|
 | [XSQL.md](./docs/XSQL.md) | The query language: shapes, params, aggregates, op files, sql-templates |
+| [FILES.md](./docs/FILES.md) | Upload, download, list, search, share and version files |
 | [CHANGELOG.md](./CHANGELOG.md) | Version history |
 | [synthigy/examples: movies/js](https://github.com/synthigy/examples/tree/main/movies/js) | End-to-end Datastar BFF against the published package |
 | [src/index.d.ts](./src/index.d.ts) | Full type definitions |
@@ -179,13 +180,19 @@ node --test 'test/*.test.js'                    # unit
 SYNTHIGY_ENDPOINT=http://localhost:7887 \
   SYNTHIGY_CLIENT_ID=… SYNTHIGY_CLIENT_SECRET=… \
   node --test 'test/integration.test.js'        # integration (skips without a server)
+SYNTHIGY_FILES_TEST_ENDPOINT=http://localhost:7887 \
+  SYNTHIGY_FILES_TEST_{ADMIN,USER,READER}_{ID,SECRET}=… \
+  npm run test:files                            # live files (skips without the endpoint)
 ```
+
+The live files suite needs three client-credentials clients whose service users
+hold File Admin, File User and File Reader. `npm test` never runs it.
 
 ## License
 
 MIT — see [LICENSE](LICENSE).
 
 The SDKs are deliberately permissive: they are client libraries you embed in
-your own application. The Synthigy **engine** is separate, and is fair-code
-under the Sustainable Use License.
+your own application. The Synthigy **engine** is separate, and is source-available
+under the Business Source License 1.1.
 

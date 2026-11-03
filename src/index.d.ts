@@ -201,6 +201,182 @@ export interface HistorySinceOpts {
 }
 
 // ============================================================================
+// Files — bytes behind /files, rows behind /data
+// ============================================================================
+
+/** A file as the files endpoints answer it. */
+export interface FileInfo {
+  xid: string
+  name: string
+  size: number
+  /** SHA-256 of the bytes, hex; also the download ETag. */
+  hash: string
+  status: 'READY' | 'UPLOADED' | 'FAILED' | 'PENDING' | string | null
+  content_type: string | null
+  uploaded_at: string | null
+  /** Who uploaded the current version. */
+  uploaded_by: { xid: string; name: string | null } | null
+  folder: { xid: string; name?: string; path?: string } | null
+  /** Loads without a token: its folder, or a folder above it, is Public. */
+  public: boolean
+}
+
+export interface FileVersion {
+  /** Pass to `download({ version })` or `restore`. */
+  id: number
+  at: string
+  /** Xid of the user who wrote this version. */
+  by: string | null
+  hash: string | null
+  size: number | null
+  content_type: string | null
+  current: boolean
+}
+
+/** Anything fetch can send: Blob/File, ArrayBuffer, typed array, string, or a stream. */
+export type FileBody =
+  | Blob | ArrayBuffer | ArrayBufferView | string
+  | ReadableStream<Uint8Array> | AsyncIterable<Uint8Array>
+
+/** A file by path ('/site/img/logo.png'), by xid, or the file itself. */
+export type FileRef = string | { xid: string }
+
+/** A folder by path ('/site/img/', '/' is ROOT), by xid, or the folder itself. */
+export type FolderRef = string | { xid: string; path?: string }
+
+export interface FolderInfo {
+  xid: string
+  name: string
+  path: string
+  /** Parent folder xid (ROOT's for a top-level folder); null only on ROOT itself. */
+  parent: string | null
+  /** Whether you may upload here, create subfolders, rename and share. */
+  writable: boolean
+  /** Files here load without a token: this folder's own Public, else the nearest folder above that has one. */
+  public: boolean
+  /** Seconds browsers and CDNs may keep the files, set the same way; null: they check every time. */
+  cache: number | null
+  /** What is set on this folder itself (null: inherited); `folder(path, settings)` writes these. */
+  settings: { public: boolean | null; cache: number | null }
+}
+
+export interface FilePutOpts {
+  /** Defaults to the Blob's type, else text/plain for strings, else application/octet-stream. */
+  contentType?: string
+  /** Refuse with FILE_CHANGED unless the stored hash still matches (a hash, or the file). */
+  ifMatch?: string | { hash: string }
+  signal?: AbortSignal
+}
+
+export type FileDownloadAs = 'blob' | 'arrayBuffer' | 'text' | 'json' | 'stream' | 'response'
+
+export interface FileDownloadOpts<A extends FileDownloadAs = 'blob'> {
+  as?: A
+  /** Inclusive byte range; `[start]` reads to the end, `[undefined, n]` the last n bytes. */
+  range?: [number | undefined, number?] | { start?: number; end?: number }
+  /** A hash you already hold: answers null instead of the bytes when unchanged. */
+  ifNoneMatch?: string
+  /** A kept version (its id, or the version itself) instead of the current bytes. */
+  version?: number | { id: number }
+  signal?: AbortSignal
+}
+
+export type FileDownloadResult<A extends FileDownloadAs> =
+  A extends 'arrayBuffer' ? ArrayBuffer
+  : A extends 'text' ? string
+  : A extends 'json' ? unknown
+  : A extends 'stream' ? ReadableStream<Uint8Array> | null
+  : A extends 'response' ? Response
+  : Blob
+
+export interface FileListOpts {
+  /** Names holding these words in order, any case; a space stands for anything between. */
+  q?: string
+  /** Files per page: default 100, at most 1000. */
+  limit?: number
+  offset?: number
+}
+
+export interface FileListing {
+  files: FileInfo[]
+  folders: FolderInfo[]
+}
+
+export interface FileSearchOpts {
+  /** Search only below this folder. */
+  folder?: FolderRef
+  /** Results per page: default 100, at most 1000. */
+  limit?: number
+  /** Skip this many results; with `truncated`, page through the rest. */
+  offset?: number
+  signal?: AbortSignal
+}
+export type FileSearchResult =
+  | (FolderInfo & { type: 'folder' })
+  /** `path` is null for a file in no folder or in a folder you cannot see; such a file matches by name. */
+  | (FileInfo & { type: 'file'; path: string | null })
+export interface FileSearch {
+  /** Shortest path first. */
+  results: FileSearchResult[]
+  /** More results after this page. */
+  truncated: boolean
+}
+export interface FolderSettings {
+  /** Files here, and in folders below without their own value, load without a token; null: inherit. */
+  public?: boolean | null
+  /** Seconds browsers and CDNs may keep the files; null: inherit. */
+  cache?: number | null
+}
+
+export type FolderAccess = 'read' | 'write' | 'delete'
+
+export type FolderAccessLists = Record<FolderAccess, {
+  users: { xid: string; name: string | null }[]
+  groups: { xid: string; name: string | null }[]
+}>
+
+/** Users and groups by xid, or the records. */
+export interface Grantees {
+  users?: (string | { xid: string })[]
+  groups?: (string | { xid: string })[]
+}
+
+export interface FilesApi {
+  /** A path creates or replaces the file there (its folder must exist); an xid or file replaces it; `{ name }` makes a new file in no folder. */
+  put(target: string | { xid: string } | { name: string }, data: FileBody, opts?: FilePutOpts): Promise<FileInfo>
+  /** The bytes; null when `ifNoneMatch` still matches. */
+  download<A extends FileDownloadAs = 'blob'>(file: FileRef, opts?: FileDownloadOpts<A>): Promise<FileDownloadResult<A> | null>
+  /** The file, or null when it is not there or you can't see it. */
+  info(file: FileRef): Promise<FileInfo | null>
+  /** A folder's files and subfolders; `null`: files in no folder; nothing: every file you can see, newest first. */
+  list(folder?: FolderRef | null, opts?: FileListOpts): Promise<FileListing>
+  /** Folders and files whose paths hold the words of `q` in order ('site logo' finds /site/img/logo.png), shortest path first. */
+  search(q: string, opts?: FileSearchOpts): Promise<FileSearch>
+  /** Delete a file, or an empty folder (a path ending in / or the folder itself). */
+  delete(target: FileRef | FolderRef): Promise<void>
+  /** Where the file loads from, without a request; `inline` opens it in the browser instead of downloading. */
+  url(file: FileRef, opts?: { inline?: boolean }): string
+  /** Rename or move; for a file, a `to` ending in / keeps the name. */
+  move(from: FileRef | FolderRef, to: string): Promise<FileInfo | FolderInfo>
+  /** The folder at `path`, made with every missing folder above it; `settings` sets its Public and Cache. */
+  folder(path: string, settings?: FolderSettings): Promise<FolderInfo>
+  /** Give users and groups an access on a folder; writers of the folder may. */
+  share(folder: FolderRef, access: FolderAccess, to: Grantees): Promise<void>
+  /** Take an access away. */
+  unshare(folder: FolderRef, access: FolderAccess, from: Grantees): Promise<void>
+  /** Who holds read, write and delete. */
+  access(folder: FolderRef): Promise<FolderAccessLists>
+  /** The kept versions (the last ten), newest first. */
+  versions(file: FileRef): Promise<FileVersion[]>
+  /** Make a kept version current again (VERSION_EXPIRED when it is gone). */
+  restore(file: FileRef, version: number | { id: number }): Promise<FileInfo>
+  /** Browser: a blob: URL of the bytes, downloaded with your token; call revoke when done. */
+  objectUrl(file: FileRef, opts?: { signal?: AbortSignal }): Promise<{ url: string; revoke(): void }>
+  /** Server: answer a browser's request with the file (Range, If-None-Match, ETag and type pass through). */
+  serve(file: FileRef, request?: Request | { method?: string; headers?: Record<string, string> }, opts?: { inline?: boolean }): Promise<Response>
+}
+
+// ============================================================================
 // Lint
 // ============================================================================
 
@@ -289,7 +465,7 @@ export interface Schema {
  * Schema resolution (typed throws ride along the engine's existing
  * walks; ex-`INTERNAL_ERROR`):
  *   UNKNOWN_OP, UNKNOWN_ENTITY, UNKNOWN_ATTRIBUTE, UNKNOWN_OPERATOR,
- *   MISSING_ON, MISSING_ROOT, XSQL_PARSE_ERROR,
+ *   MISSING_ON, MISSING_ROOT, UNKNOWN_TREE_RELATION, XSQL_PARSE_ERROR,
  *   PARAM_MISSING, PARAM_TYPE_MISMATCH
  *
  * DB:
@@ -317,11 +493,17 @@ export type SynthigyErrorCode =
   | 'INVALID_BODY' | 'NO_OPERATIONS' | 'BAD_OP' | 'MISSING_ENTITY'
   | 'BAD_ARGS_SHAPE'
   | 'UNKNOWN_OP' | 'UNKNOWN_ENTITY' | 'UNKNOWN_ATTRIBUTE' | 'UNKNOWN_OPERATOR'
-  | 'MISSING_ON' | 'MISSING_ROOT' | 'XSQL_PARSE_ERROR'
+  | 'MISSING_ON' | 'MISSING_ROOT' | 'UNKNOWN_TREE_RELATION' | 'XSQL_PARSE_ERROR'
   | 'PARAM_MISSING' | 'PARAM_TYPE_MISMATCH'
   | 'FK_VIOLATION' | 'UNIQUE_VIOLATION' | 'NOT_NULL_VIOLATION'
   | 'CHECK_VIOLATION' | 'TYPE_CAST_FAILURE' | 'TIMEOUT'
   | 'HTTP_ERROR' | 'OPERATION_ERROR' | 'INTERNAL_ERROR'
+  | 'FILE_NOT_FOUND' | 'FOLDER_NOT_FOUND' | 'FILE_NAME_TAKEN' | 'FILE_CHANGED'
+  | 'FILE_NOT_READY' | 'FILE_TOO_LARGE' | 'NAME_REQUIRED' | 'UNSUPPORTED_MEDIA_TYPE'
+  | 'RANGE_NOT_SATISFIABLE' | 'FILES_UNAVAILABLE' | 'AUDIT_UNAVAILABLE'
+  | 'FOLDER_NOT_EMPTY' | 'FOLDER_NAME_TAKEN' | 'FOLDER_CYCLE' | 'INVALID_NAME' | 'INVALID_ACCESS'
+  | 'VERSION_EXPIRED' | 'INVALID_PATH' | 'INVALID_SETTINGS' | 'INVALID_QUERY'
+  | 'METHOD_NOT_ALLOWED' | 'NOT_FOUND' | 'ENGINE_OWNED' | 'INVALID_SLICE'
   | (string & {})
 
 /** `whoami()` — the identity a call runs as. `client` is null in-process (no OAuth client). */
@@ -723,6 +905,10 @@ export class SynthigyClient {
 
   /** Fetch current subscription state from the server. */
   subscriptions(): Promise<{ subscriptions: SubscriptionInfo[] }>
+
+  // ── Files — upload, download, versions ───────────────────────────────────
+
+  files: FilesApi
 
   // ── History — temporal query surface ─────────────────────────────────────
 
@@ -1338,6 +1524,7 @@ export const whoami: SynthigyClient['whoami']
 export const runtimeModel: SynthigyClient['runtimeModel']
 export const token: SynthigyClient['token']
 export function history(): SynthigyClient['history']
+export function files(): SynthigyClient['files']
 export function login(): SynthigyClient['login']
 
 export const listen: SynthigyClient['listen']

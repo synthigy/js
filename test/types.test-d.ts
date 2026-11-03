@@ -104,3 +104,52 @@ async function bulkWriteContract(c: SynthigyClient) {
   opBuilders.stack('movie', { xid: 'a' }, true) satisfies Operation
 }
 void bulkWriteContract
+
+// ── files contract ─────────────────────────────────────────────────────────
+async function filesContract(c: SynthigyClient) {
+  const f = await c.files.put('/site/img/logo.png', new Blob(['x']))
+  f.hash satisfies string
+  f.public satisfies boolean
+  f.folder satisfies { xid: string; name?: string; path?: string } | null
+  await c.files.put(f, 'v2', { ifMatch: f })
+  await c.files.put({ name: 'scan.pdf' }, new Uint8Array([1]))
+  const blob = await c.files.download(f.xid)
+  blob satisfies Blob | null
+  const text = await c.files.download('/site/img/logo.png', { as: 'text', range: [0, 9] })
+  text satisfies string | null
+  const buf = await c.files.download(f.xid, { as: 'arrayBuffer' })
+  buf satisfies ArrayBuffer | null
+  ;(await c.files.info('/site/img/logo.png'))?.xid satisfies string | undefined
+  const { files, folders } = await c.files.list('/site/img/', { q: 'logo', limit: 10 })
+  files satisfies import('../src/index.js').FileInfo[]
+  folders[0]?.writable satisfies boolean | undefined
+  const { results, truncated } = await c.files.search('site logo', { folder: '/site/', limit: 20 })
+  truncated satisfies boolean
+  for (const r of results) {
+    if (r.type === 'file') r.path satisfies string | null
+    else r.writable satisfies boolean
+  }
+  await c.files.list(null)
+  await c.files.list()
+  c.files.url(f) satisfies string
+  c.files.url('/site/img/logo.png', { inline: true }) satisfies string
+  f.uploaded_by?.name satisfies string | null | undefined
+  ;(await c.files.versions(f.xid))[0]?.current satisfies boolean | undefined
+  const [v] = await c.files.versions(f.xid)
+  if (v) { await c.files.download(f.xid, { version: v }); await c.files.restore(f.xid, v.id) }
+  const d = await c.files.folder('/site/', { public: true, cache: 3600 })
+  d.writable satisfies boolean
+  await c.files.move('/site/img/logo.png', '/site/brand/')
+  await c.files.share(d, 'write', { users: ['U'] })
+  ;(await c.files.access(d)).write.users satisfies { xid: string; name: string | null }[]
+  const { url, revoke } = await c.files.objectUrl(f)
+  url satisfies string
+  revoke()
+  ;(await c.files.serve(f, new Request('http://bff/x'))) satisfies Response
+  await c.files.delete('/site/brand/')
+  // @ts-expect-error access is read, write or delete
+  await c.files.share(d, 'own', { users: ['U'] })
+  // @ts-expect-error put needs a target
+  await c.files.put(42, 'x')
+}
+void filesContract

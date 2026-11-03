@@ -1,6 +1,6 @@
 {
   "name": "@synthigy/sdk",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Zero-dependency client for Synthigy's /data endpoint",
   "author": "Robert Geršak",
   "license": "MIT",
@@ -37,6 +37,7 @@
     "test": "node --test test/*.test.js",
     "pretest:live": "npm run typecheck",
     "test:live": "node --test test/integration.test.js",
+    "test:files": "node --test test/files.live.test.js",
     "codegen": "node codegen/codegen.mjs"
   },
   "keywords": [

@@ -78,11 +78,11 @@ Result:
   "_agg": { "ratings": { "value": { "avg": 4.3 } } } }
 ```
 
-## Relations: inner vs left
+## Relations: inner, left and none
 
 `->relation` is a **left** pull — parent rows survive even when the relation
 is empty (empty relations are simply omitted from the result, see
-[WIRE-FORMAT.md](./WIRE-FORMAT.md)). `-relation` is an **inner** pull — the
+[the data API](https://github.com/synthigy/synthigy/blob/main/docs/DATA.md#selections)). `-relation` is an **inner** pull — the
 relation's existence scopes the parent. The compiler emits an explicit
 `_join` for both sigils.
 
@@ -90,6 +90,10 @@ The engine's wire default matches `->`: absent `_join` is LEFT for every
 operation — a selection is a projection and never drops parents, and
 relation args filter the related rows. Parent scoping is always explicit
 (`-rel` / `_join: "inner"`).
+
+`!relation` (`_join: "none"`) keeps only the parents with no matching related
+row; it selects nothing, so its block holds only filters and nested `-`/`!`
+constraints.
 
 ## Op files (`.xsql`)
 
@@ -119,13 +123,15 @@ Headers:
 |---|---|
 | `@search <name>` | List/query op — returns rows |
 | `@get <name>` | Single-record op — returns one row |
-| `@watch` | Mark the op live-watchable ([WATCH.md](./WATCH.md)) |
+| `@watch` | Mark the op live-watchable ([live data](https://github.com/synthigy/synthigy/blob/main/docs/DATA.md#live-data)) |
 | `@sql-template <name>` | Raw-SQL op ([below](#sql-templates)) |
 | `@namespace <Name>` | Which generated class the method attaches to |
 | `@returns <name>:<type>` | Declares result columns for a sql-template |
 
-XSQL is **read-only**. Writes go through the wire write primitives (`sync`,
-`stack`, `slice`, `delete`, `purge`) — see [WIRE-FORMAT.md](./WIRE-FORMAT.md).
+Queries above are reads. Writes are `@sync`, `@stack` and `@delete` operations
+whose body is a data parameter (`?records:movie[]`), and `@slice` / `@purge`
+act on the rows a query matches — see [XSQL](https://github.com/synthigy/synthigy/blob/main/docs/XSQL.md#operation-files) and
+[the data API](https://github.com/synthigy/synthigy/blob/main/docs/DATA.md#writing).
 
 ## sql-templates
 

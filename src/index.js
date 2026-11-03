@@ -125,7 +125,8 @@ export function rel(selections, args, alias) {
  * Join semantics are the SERVER's: absent `_join` is LEFT (a selection is
  * a projection and never drops parents; relation args filter the related
  * rows). The client injects nothing — pass `args: { _join: 'inner' }`
- * explicitly when the relation's existence should scope its parent.
+ * explicitly when the relation's existence should scope its parent, or
+ * `'none'` to keep only parents with no matching related row.
  */
 /**
  * Ensure an XSQL operation DOCUMENT (STRICT wire: XSQL travels only as
@@ -680,6 +681,12 @@ const ERROR_CATEGORIES = {
   CLAIM_INVALID:              'auth',
   NO_TOKEN:                   'auth', // client-side: no token source configured — retrying can't fix it
   NO_ENDPOINT:                'validation', // client-side: no endpoint configured — retrying can't fix it
+  IMMUTABLE_VERSION_ALTERED:  'validation',
+  ENTITY_NAME_CONFLICT:       'validation',
+  FIELD_KEY_CONFLICT:         'validation',
+  SYSTEM_ENTITY_RLS:          'validation',
+  RLS_GUARD_BROKEN:           'validation',
+  VERSION_NAME_TAKEN:         'validation',
   NO_LOGIN_STORE:             'auth', // client-side: no login store registered — retrying can't fix it
   LOGIN_NONCE_MISMATCH:       'auth',
   LOGIN_EXCHANGE_FAILED:      'auth',
@@ -705,13 +712,18 @@ const ERROR_CATEGORIES = {
   CREATE_FORBIDDEN:           'iam',
   DELETE_FORBIDDEN:           'iam',
   SLOT_OCCUPIED:              'iam',
+  SYSTEM_DATASET_ENGINE_OWNED: 'iam',
+  SYSTEM_ENTITY_ALTERED:      'iam',
+  ENGINE_OWNED:               'iam',
   // validation
   INVALID_BODY:               'validation',
   NO_OPERATIONS:              'validation',
   UNKNOWN_OP:                 'validation',
   UNKNOWN_OPERATOR:           'validation',
+  INVALID_JOIN:               'validation',
   MISSING_ON:                 'validation',
   MISSING_ROOT:               'validation',
+  UNKNOWN_TREE_RELATION:      'validation',
   MISSING_RECORDS:            'validation',
   EMPTY_RECORDS:              'validation',
   MISSING_ENTITIES:           'validation',
@@ -743,14 +755,38 @@ const ERROR_CATEGORIES = {
   CLAIM_METHOD_NOT_ALLOWED:   'validation',
   PASSWORD_TOO_WEAK:          'validation',
   RETURN_URL_NOT_REGISTERED:  'validation',
+  NAME_REQUIRED:              'validation',
+  FILE_TOO_LARGE:             'validation',
+  UNSUPPORTED_MEDIA_TYPE:     'validation',
+  RANGE_NOT_SATISFIABLE:      'validation',
   // not_found
   UNKNOWN_ENTITY:             'not_found',
   UNKNOWN_RELATION:           'not_found',
   UNKNOWN_TEMPLATE_RELATION:  'not_found',
   HISTORY_UNAVAILABLE:        'not_found', // no audit provider — retrying can't fix it
+  NOT_FOUND:                  'not_found',
+  FILE_NOT_FOUND:             'not_found',
+  FOLDER_NOT_FOUND:           'not_found',
+  FOLDER_NOT_EMPTY:           'conflict',
+  FOLDER_NAME_TAKEN:          'conflict',
+  FOLDER_CYCLE:               'conflict',
+  INVALID_NAME:               'validation',
+  INVALID_ACCESS:             'validation',
+  INVALID_PATH:               'validation',
+  INVALID_SETTINGS:           'validation',
+  INVALID_QUERY:              'validation',
+  METHOD_NOT_ALLOWED:         'validation',
+  INVALID_SLICE:              'validation',
+  FILES_UNAVAILABLE:          'not_found', // the files module is not running — retrying can't fix it
+  AUDIT_UNAVAILABLE:          'not_found', // file writes need audit history and none is running
   // conflict (e.g., DB constraint violations the server translates)
   FK_VIOLATION:               'conflict',
+  MODEL_BUSY:                 'conflict',
   UNIQUE_VIOLATION:           'conflict',
+  FILE_NAME_TAKEN:            'conflict',
+  FILE_CHANGED:               'conflict',
+  FILE_NOT_READY:             'conflict',
+  VERSION_EXPIRED:            'not_found',
   CHECK_VIOLATION:            'conflict',
   NOT_NULL_VIOLATION:         'conflict',
   // rate / capacity
@@ -2101,6 +2137,275 @@ class SynthigyClient {
     return body.result
   }
 
+  /** @private */
+  async _filesFetch(path, fetchOpts = {}) {
+    const resp = await this._fetchAuth(`${this._endpoint}/files${path}`, fetchOpts)
+    if (resp.ok || resp.status === 304) return resp
+    const requestId = resp.headers?.get?.('x-request-id') ?? undefined
+    if (resp.status === 416) {
+      throw new SynthigyError('Range not satisfiable', 'RANGE_NOT_SATISFIABLE', undefined,
+        { requestId, status: 416 })
+    }
+    const text = await resp.text().catch(() => '')
+    let data
+    try { data = JSON.parse(text) } catch { /* not JSON */ }
+    if (data?.error?.code === 'NOT_FOUND' || (resp.status === 404 && !data?.error)) {
+      throw new SynthigyError('Files are not available on this server — is the files module running?',
+        'FILES_UNAVAILABLE', undefined, { requestId, status: resp.status })
+    }
+    if (data?.error) throw _errorFromServer(data.error, resp.status, requestId)
+    throw new SynthigyError(`Files request failed (${resp.status})`, 'HTTP_ERROR', text,
+      { requestId, status: resp.status })
+  }
+
+  // Bytes live behind /files, their rows behind /data: `files` speaks both.
+  get files() {
+    if (!this._files) {
+      const self = this
+      const body = (data, contentType) => {
+        const type = contentType
+          ?? (typeof Blob !== 'undefined' && data instanceof Blob && data.type ? data.type : undefined)
+          ?? (typeof data === 'string' ? 'text/plain; charset=utf-8' : 'application/octet-stream')
+        if (/^application\/x-www-form-urlencoded/i.test(type)) {
+          throw new SynthigyError('a form-encoded body is parsed as a form, not stored — send the bytes with their own type',
+            'UNSUPPORTED_MEDIA_TYPE')
+        }
+        const streaming = (typeof ReadableStream !== 'undefined' && data instanceof ReadableStream)
+          || (data && typeof data[Symbol.asyncIterator] === 'function' && !(typeof Blob !== 'undefined' && data instanceof Blob))
+        return {
+          headers: { 'Content-Type': type },
+          body: data,
+          ...(streaming && { duplex: 'half' }),
+        }
+      }
+      const isPath = (x) => typeof x === 'string' && x.startsWith('/')
+      const xidOf = (x) => (typeof x === 'string' ? x : x?.xid)
+      const isFolder = (x) => (isPath(x) && x.endsWith('/'))
+        || (x !== null && typeof x === 'object' && typeof x.path === 'string' && x.path.endsWith('/'))
+      const folderRef = (x) => (typeof x === 'string' ? x : (x?.path ?? x?.xid))
+      const query = (params) => {
+        const q = new URLSearchParams()
+        for (const [k, v] of Object.entries(params)) {
+          if (v !== undefined && v !== null && v !== '') q.set(k, String(v))
+        }
+        const s = q.toString()
+        return s ? `?${s}` : ''
+      }
+      const encodePath = (p) => p.split('/').map((part) => encodeURIComponent(part)
+        .replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)).join('/')
+      const fileAt = (ref, tail = '') => (isPath(ref) ? `${tail}${query({ path: ref })}` : `/${encodeURIComponent(xidOf(ref))}${tail}`)
+      const folderAt = (ref, tail = '') => {
+        const r = folderRef(ref)
+        return isPath(r) ? `/folders${tail}${query({ path: r })}` : `/folders/${encodeURIComponent(r)}${tail}`
+      }
+      const json = async (path, method, payload) => {
+        const resp = await self._filesFetch(path, {
+          method,
+          ...(payload !== undefined && { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
+        })
+        return resp.status === 204 ? undefined : resp.json()
+      }
+      const read = async (resp, as) => {
+        switch (as) {
+          case 'response': return resp
+          case 'stream': return resp.body
+          case 'arrayBuffer': return resp.arrayBuffer()
+          case 'text': return resp.text()
+          case 'json': return resp.json()
+          default: return resp.blob()
+        }
+      }
+      const xidAt = async (ref) => {
+        if (!isPath(ref)) return xidOf(ref)
+        const file = await self.files.info(ref)
+        if (!file) throw new SynthigyError(`No such file: ${ref}`, 'FILE_NOT_FOUND', undefined, { status: 404 })
+        return file.xid
+      }
+      const grantees = (who = {}) => ({ users: (who.users ?? []).map(xidOf), groups: (who.groups ?? []).map(xidOf) })
+      this._files = {
+        /**
+         * Store bytes. A path ('/a/b/name', the folder must exist) creates the
+         * file or replaces it; an xid or the file replaces that file;
+         * `{ name }` makes a new file in no folder.
+         */
+        async put(target, data, opts = {}) {
+          const { headers, ...rest } = body(data, opts.contentType)
+          const expected = typeof opts.ifMatch === 'string' ? opts.ifMatch : opts.ifMatch?.hash
+          let method = 'PUT'
+          let path
+          if (isPath(target)) path = query({ path: target })
+          else if (xidOf(target)) path = `/${encodeURIComponent(xidOf(target))}`
+          else if (target?.name) { method = 'POST'; path = query({ name: target.name }) }
+          else throw new SynthigyError('put takes a path, an xid or file, or { name } for a file in no folder', 'INVALID_PATH')
+          const resp = await self._filesFetch(path, {
+            method, signal: opts.signal, ...rest,
+            headers: { ...headers, ...(expected && { 'If-Match': `"${expected}"` }) },
+          })
+          return resp.json()
+        },
+
+        /**
+         * The bytes of a file; `as` picks the shape (default blob), `range:
+         * [start, end]` (inclusive) reads part of it, `version` a kept one.
+         */
+        async download(ref, opts = {}) {
+          const headers = {}
+          if (opts.range) {
+            const [start, end] = Array.isArray(opts.range) ? opts.range : [opts.range.start, opts.range.end]
+            headers.Range = `bytes=${start ?? ''}-${end ?? ''}`
+          }
+          if (opts.ifNoneMatch) headers['If-None-Match'] = `"${opts.ifNoneMatch}"`
+          const path = opts.version === undefined
+            ? fileAt(ref)
+            : `/${encodeURIComponent(await xidAt(ref))}/versions/${encodeURIComponent(opts.version?.id ?? opts.version)}`
+          const resp = await self._filesFetch(path, { method: 'GET', headers, signal: opts.signal })
+          if (resp.status === 304) return null
+          return read(resp, opts.as)
+        },
+
+        /** The file, or null when it is not there or you cannot see it. */
+        async info(ref) {
+          try {
+            return await (await self._filesFetch(fileAt(ref, '/info'), { method: 'GET' })).json()
+          } catch (err) {
+            if (err instanceof SynthigyError && (err.code === 'FILE_NOT_FOUND' || err.code === 'FOLDER_NOT_FOUND')) return null
+            throw err
+          }
+        },
+
+        /**
+         * A folder's files and subfolders. `null`: the files in no folder;
+         * nothing: every file you can see, newest first (with `q`, a search).
+         */
+        async list(folder, opts = {}) {
+          const page = { q: opts.q, limit: opts.limit, offset: opts.offset }
+          const files = async (params) => (await (await self._filesFetch(query(params), { method: 'GET' })).json()).files
+          if (folder === undefined) return { files: await files(page), folders: [] }
+          if (folder === null) return { files: await files({ ...page, folderless: 'true' }), folders: [] }
+          const ref = folderRef(folder)
+          const [found, folders] = await Promise.all([
+            files({ ...page, folder: ref }),
+            self._filesFetch(`/folders${query({ parent: ref })}`, { method: 'GET' }).then((r) => r.json()).then((b) => b.folders),
+          ])
+          const words = (opts.q ?? '').trim().split(/\s+/).filter(Boolean)
+          const holds = new RegExp(words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*'), 'i')
+          return { files: found, folders: words.length ? folders.filter((f) => holds.test(f.name)) : folders }
+        },
+
+        /**
+         * Folders and files whose paths hold the words of `q` in order,
+         * shortest path first; `folder` keeps it below that folder.
+         */
+        async search(q, opts = {}) {
+          const params = { q, folder: opts.folder === undefined ? undefined : folderRef(opts.folder), limit: opts.limit, offset: opts.offset }
+          return (await self._filesFetch(`/search${query(params)}`, { method: 'GET', signal: opts.signal })).json()
+        },
+
+        /** Delete a file, or an empty folder (a path ending in / or the folder itself). */
+        async delete(ref) {
+          await self._filesFetch(isFolder(ref) ? folderAt(ref) : fileAt(ref), { method: 'DELETE' })
+        },
+
+        /**
+         * Where a file loads from, without a request: /files/<xid>, or
+         * /files/path/... for a path. `inline` opens it in the browser
+         * instead of downloading it.
+         */
+        url(ref, opts = {}) {
+          let u
+          if (isPath(ref)) {
+            if (ref.endsWith('/')) throw new SynthigyError('url takes a file, not a folder', 'INVALID_PATH')
+            u = `${self._endpoint}/files/path${encodePath(ref)}`
+          } else {
+            u = `${self._endpoint}/files/${encodeURIComponent(xidOf(ref))}`
+          }
+          return opts.inline ? `${u}?disposition=inline` : u
+        },
+
+        /**
+         * Rename or move. A file goes to `to` ('/a/new.png'), or into a folder
+         * when `to` ends in / (the name stays); a folder's `to` is its new path.
+         */
+        async move(from, to) {
+          if (!isPath(to)) throw new SynthigyError('move takes the new path, for example /site/brand/logo.png', 'INVALID_PATH')
+          if (isFolder(from)) {
+            const parts = to.split('/').filter(Boolean)
+            const name = parts.pop()
+            if (!name) throw new SynthigyError('a folder moves to a path like /archive/2026/', 'INVALID_PATH')
+            return json(folderAt(from), 'PATCH', { name, parent: parts.length ? `/${parts.join('/')}/` : '/' })
+          }
+          const cut = to.lastIndexOf('/')
+          return json(fileAt(from), 'PATCH',
+            to.endsWith('/') ? { folder: to } : { folder: to.slice(0, cut + 1), name: to.slice(cut + 1) })
+        },
+
+        /** The folder at `path`, made with every missing folder above it; `settings` sets its Public and Cache. */
+        async folder(path, settings) {
+          return json(`/folders${query({ path })}`, 'PUT', settings ?? {})
+        },
+
+        /** Give users and groups (xids or records) an access on a folder; writers of the folder may. */
+        async share(folder, access, to) {
+          await json(folderAt(folder, '/share'), 'POST', { access, ...grantees(to) })
+        },
+
+        /** Take an access on a folder away from users and groups. */
+        async unshare(folder, access, from) {
+          await json(folderAt(folder, '/unshare'), 'POST', { access, ...grantees(from) })
+        },
+
+        /** Who holds read, write and delete on a folder. */
+        async access(folder) {
+          return (await self._filesFetch(folderAt(folder, '/access'), { method: 'GET' })).json()
+        },
+
+        /** The kept versions (the last ten), newest first. */
+        async versions(ref) {
+          return (await (await self._filesFetch(`/${encodeURIComponent(await xidAt(ref))}/versions`, { method: 'GET' })).json()).versions
+        },
+
+        /** Make a kept version current again; the bytes are not copied. */
+        async restore(ref, version) {
+          const id = version?.id ?? version
+          return (await self._filesFetch(`/${encodeURIComponent(await xidAt(ref))}/versions/${encodeURIComponent(id)}/restore`,
+            { method: 'POST' })).json()
+        },
+
+        /** Browser: download with your token and get a blob: URL for <img> or <iframe>; call revoke when done. */
+        async objectUrl(ref, opts = {}) {
+          const blob = await self.files.download(ref, { as: 'blob', signal: opts.signal })
+          const url = URL.createObjectURL(blob)
+          return { url, revoke: () => URL.revokeObjectURL(url) }
+        },
+
+        /**
+         * Server: answer a browser's request with the file. Range, If-None-Match
+         * and If-Range go through, and the answer keeps status, type, length,
+         * ETag and name; a refusal comes back as the engine's own answer.
+         */
+        async serve(ref, request, opts = {}) {
+          const headers = {}
+          for (const k of ['range', 'if-none-match', 'if-range']) {
+            const v = typeof request?.headers?.get === 'function' ? request.headers.get(k) : request?.headers?.[k]
+            if (v) headers[k] = v
+          }
+          const path = fileAt(ref)
+          const url = `${self._endpoint}/files${path}${opts.inline ? `${path.includes('?') ? '&' : '?'}disposition=inline` : ''}`
+          const resp = await self._fetchAuth(url, { method: request?.method === 'HEAD' ? 'HEAD' : 'GET', headers },
+            { applyTimeout: false })
+          const out = new Headers()
+          for (const k of ['content-type', 'content-length', 'content-range', 'accept-ranges', 'etag',
+            'content-disposition', 'cache-control', 'x-content-type-options', 'content-security-policy']) {
+            const v = resp.headers.get(k)
+            if (v) out.set(k, v)
+          }
+          return new Response(resp.body, { status: resp.status, headers: out })
+        },
+      }
+    }
+    return this._files
+  }
+
   get login() {
     if (!this._login) this._login = createLoginApi(this, { SynthigyError })
     return this._login
@@ -2710,6 +3015,7 @@ export const whoami        = (...a) => _dflt().whoami(...a)
 export const runtimeModel  = (...a) => _dflt().runtimeModel(...a)
 export const token         = (...a) => _dflt().token(...a)
 export const history       = () => _dflt().history
+export const files         = () => _dflt().files
 export const login         = () => _dflt().login
 
 // Streaming + live watches

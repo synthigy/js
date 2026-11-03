@@ -1,7 +1,7 @@
 /**
  * Browser login as a PUBLIC client: authorization code + PKCE, silent renew
- * through a hidden iframe, tokens in memory only. The same flow Synthigy's own
- * tools use (the Clojure SDK's `synthigy.client.login`).
+ * through a hidden iframe, tokens in memory only. Full-page redirect only:
+ * Synthigy's own tools sign in by popup (the Clojure SDK's `synthigy.client.login`).
  *
  * The server-side, confidential flow is `client.login` (login.js). This one
  * holds no secret: the code exchange is authenticated by the PKCE verifier.
