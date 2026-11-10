@@ -702,6 +702,7 @@ const ERROR_CATEGORIES = {
   interaction_required:       'auth',
   // iam
   FORBIDDEN:                  'iam',
+  LINKS_DISABLED:             'iam',
   FORBIDDEN_OP:               'iam',
   ENTITY_FORBIDDEN:           'iam',
   ENTITY_NOT_READABLE:        'iam',
@@ -757,6 +758,7 @@ const ERROR_CATEGORIES = {
   RETURN_URL_NOT_REGISTERED:  'validation',
   NAME_REQUIRED:              'validation',
   FILE_TOO_LARGE:             'validation',
+  ZIP_TOO_LARGE:              'validation',
   UNSUPPORTED_MEDIA_TYPE:     'validation',
   RANGE_NOT_SATISFIABLE:      'validation',
   // not_found
@@ -766,6 +768,7 @@ const ERROR_CATEGORIES = {
   HISTORY_UNAVAILABLE:        'not_found', // no audit provider — retrying can't fix it
   NOT_FOUND:                  'not_found',
   FILE_NOT_FOUND:             'not_found',
+  LINK_NOT_FOUND:             'not_found',
   FOLDER_NOT_FOUND:           'not_found',
   FOLDER_NOT_EMPTY:           'conflict',
   FOLDER_NAME_TAKEN:          'conflict',
@@ -777,8 +780,10 @@ const ERROR_CATEGORIES = {
   INVALID_QUERY:              'validation',
   METHOD_NOT_ALLOWED:         'validation',
   INVALID_SLICE:              'validation',
+  INVALID_EXPIRES:            'validation',
   FILES_UNAVAILABLE:          'not_found', // the files module is not running — retrying can't fix it
   AUDIT_UNAVAILABLE:          'not_found', // file writes need audit history and none is running
+  FILES_MIGRATING:            'internal',  // uploads paused while files move to a new store — retry shortly
   // conflict (e.g., DB constraint violations the server translates)
   FK_VIOLATION:               'conflict',
   MODEL_BUSY:                 'conflict',
@@ -2138,8 +2143,10 @@ class SynthigyClient {
   }
 
   /** @private */
-  async _filesFetch(path, fetchOpts = {}) {
-    const resp = await this._fetchAuth(`${this._endpoint}/files${path}`, fetchOpts)
+  async _filesFetch(path, fetchOpts = {}, { bytes = false } = {}) {
+    const kf = this._defaultKeyFormat
+    const cased = kf && kf !== 'snake' ? `${path.includes('?') ? '&' : '?'}key_format=${kf}` : ''
+    const resp = await this._fetchAuth(`${this._endpoint}/files${path}${cased}`, fetchOpts, { applyTimeout: !bytes })
     if (resp.ok || resp.status === 304) return resp
     const requestId = resp.headers?.get?.('x-request-id') ?? undefined
     if (resp.status === 416) {
@@ -2240,7 +2247,7 @@ class SynthigyClient {
           const resp = await self._filesFetch(path, {
             method, signal: opts.signal, ...rest,
             headers: { ...headers, ...(expected && { 'If-Match': `"${expected}"` }) },
-          })
+          }, { bytes: true })
           return resp.json()
         },
 
@@ -2258,8 +2265,24 @@ class SynthigyClient {
           const path = opts.version === undefined
             ? fileAt(ref)
             : `/${encodeURIComponent(await xidAt(ref))}/versions/${encodeURIComponent(opts.version?.id ?? opts.version)}`
-          const resp = await self._filesFetch(path, { method: 'GET', headers, signal: opts.signal })
+          const resp = await self._filesFetch(path, { method: 'GET', headers, signal: opts.signal }, { bytes: true })
           if (resp.status === 304) return null
+          return read(resp, opts.as)
+        },
+
+        /**
+         * One zip of `files` and of everything inside `folders` (xids, paths
+         * or the objects), read as you and streamed by the server; what you
+         * cannot read is listed in its `_skipped.txt`. `as` as in download.
+         */
+        async zip({ files = [], folders = [] } = {}, opts = {}) {
+          const fileRef = (x) => (typeof x === 'string' ? x : (x?.xid ?? x?.path))
+          const resp = await self._filesFetch('/zip', {
+            method: 'POST',
+            signal: opts.signal,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ files: files.map(fileRef), folders: folders.map(folderRef) }),
+          }, { bytes: true })
           return read(resp, opts.as)
         },
 
@@ -2339,9 +2362,10 @@ class SynthigyClient {
             to.endsWith('/') ? { folder: to } : { folder: to.slice(0, cut + 1), name: to.slice(cut + 1) })
         },
 
-        /** The folder at `path`, made with every missing folder above it; `settings` sets its Public and Cache. */
+        /** The folder at `path`, made with every missing folder above it; `settings` sets its public, cache and canLink. */
         async folder(path, settings) {
-          return json(`/folders${query({ path })}`, 'PUT', settings ?? {})
+          const { canLink, ...rest } = settings ?? {}
+          return json(`/folders${query({ path })}`, 'PUT', canLink === undefined ? rest : { ...rest, can_link: canLink })
         },
 
         /** Give users and groups (xids or records) an access on a folder; writers of the folder may. */
@@ -2369,6 +2393,29 @@ class SynthigyClient {
           const id = version?.id ?? version
           return (await self._filesFetch(`/${encodeURIComponent(await xidAt(ref))}/versions/${encodeURIComponent(id)}/restore`,
             { method: 'POST' })).json()
+        },
+
+        /**
+         * A link that downloads the file without signing in, in folders where
+         * links are on: `expires` seconds (default 3600, at most 7 days),
+         * `maxDownloads`, `inline`. Its `url` is shown only now.
+         */
+        async link(ref, opts = {}) {
+          return json(`/${encodeURIComponent(await xidAt(ref))}/links`, 'POST', {
+            ...(opts.expires !== undefined && { expires: opts.expires }),
+            ...(opts.maxDownloads !== undefined && { max_downloads: opts.maxDownloads }),
+            ...(opts.inline !== undefined && { inline: opts.inline }),
+          })
+        },
+
+        /** The file's live links you can see: your own, or all of them for File Admin. */
+        async links(ref) {
+          return (await json(`/${encodeURIComponent(await xidAt(ref))}/links`, 'GET')).links
+        },
+
+        /** End a link (the link or its xid) at once, on every engine. */
+        async unlink(link) {
+          await json(`/links/${encodeURIComponent(typeof link === 'string' ? link : link.xid)}`, 'DELETE')
         },
 
         /** Browser: download with your token and get a blob: URL for <img> or <iframe>; call revoke when done. */

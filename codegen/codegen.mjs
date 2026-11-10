@@ -287,12 +287,12 @@ const alias = (n) => `_${entityPascal(n)}`
 function projectionType(entityName, fields) {
   visited.add(entityName)
   const A       = alias(entityName)
-  // scalars become a Pick over the entity; relations + aggregate maps become
-  // extra object members. `_count`/`_agg` (kind "map") must NOT enter the Pick —
-  // they aren't entity attributes — so filter them out of scalars.
-  const scalars = fields.filter(f => f.kind !== 'relation' && f.kind !== 'map').map(f => toKey(f.key))
+  // scalars become a Pick over the entity; relations + operations become extra
+  // object members. Operation aliases (kind "op") aren't entity attributes, so
+  // they stay out of the Pick and are typed from the IR.
+  const scalars = fields.filter(f => f.kind !== 'relation' && f.kind !== 'op').map(f => toKey(f.key))
   const rels    = fields.filter(f => f.kind === 'relation')
-  const maps    = fields.filter(f => f.kind === 'map')
+  const ops     = fields.filter(f => f.kind === 'op')
   const pick    = scalars.length ? `Pick<${A}, ${scalars.map(k => JSON.stringify(k)).join(' | ')}>` : null
   const relLines = rels.map(r => {
     const target = ent(entityName).relations?.[r.key]?.to ?? r.key   // schema lookup stays snake
@@ -300,10 +300,8 @@ function projectionType(entityName, fields) {
     const t      = r.cardinality === 'many' ? `(${inner})[]` : `(${inner})`
     return `  ${toKey(r.key)}?: ${t}`
   })
-  // _count → Record<string, number>; _agg → Record<string, unknown> (honest maps,
-  // not a precise nested type — the wire keys are alias-dependent).
-  const mapLines = maps.map(m => `  ${m.key}?: Record<string, ${TS[m.value] ?? 'unknown'}>`)
-  const objLines = [...relLines, ...mapLines]
+  const opLines  = ops.map(o => `  ${toKey(o.key)}: ${TS[o.type] ?? 'unknown'}${o.nullable === false ? '' : ' | null'}`)
+  const objLines = [...relLines, ...opLines]
   if (!objLines.length) return pick ?? '{}'
   return `${pick ? pick + ' & ' : ''}{\n${objLines.join('\n')}\n}`
 }
@@ -315,7 +313,7 @@ const xsqlLiteral = (s) => '`' + s.replace(/`/g, '\\`').replace(/\$\{/g, '\\${')
 function fieldsToSel(fields) {
   const obj = {}
   for (const f of fields) {
-    if (f.kind === 'map') continue   // _count/_agg have no plain wire-selection form
+    if (f.kind === 'op') continue   // the IR carries no relation/op to rebuild it from
     obj[f.key] = f.kind === 'relation' ? fieldsToSel(f.fields) : null
   }
   return obj
@@ -516,7 +514,7 @@ for (const name of allEntities) {                  // 1:1 with the model — eve
     if (rels[k]) continue
     lines.push(`  ${key(a, k)}: ${scalarType(a)}`)
     const wt = tsScalar(a, true)       // write scalar (e.g. hashed → string, not never)
-    if (wt !== 'never') wlines.push(`  ${key(a, k)}?: ${a.nullable === false ? wt : `${wt} | null`}`)
+    if (wt !== 'never' && !a['read-only']) wlines.push(`  ${key(a, k)}?: ${a.nullable === false ? wt : `${wt} | null`}`)
   }
   for (const [k, r] of Object.entries(rels)) {
     if (!schema.entities[r.to]) continue           // relation target filtered out of schema → skip
@@ -524,7 +522,7 @@ for (const name of allEntities) {                  // 1:1 with the model — eve
     // WRITE relation: a LINK to an existing record ({ xid }) OR a nested write.
     // This is the FK-reference the wire actually accepts — not the full read entity.
     const link = `{ xid: string } | ${entityPascal(r.to)}Write`
-    wlines.push(`  ${key(r, k)}?: ${r.cardinality === 'many' ? `(${link})[]` : link}`)
+    if (!e.attributes?.[k]?.['read-only']) wlines.push(`  ${key(r, k)}?: ${r.cardinality === 'many' ? `(${link})[]` : link}`)
   }
   schemaChunks.push(`export interface ${entityPascal(name)} {\n${lines.join('\n')}\n}`)
   if (flags.writes) schemaChunks.push(`export interface ${entityPascal(name)}Write {\n${wlines.join('\n')}\n}`)

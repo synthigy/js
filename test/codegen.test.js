@@ -29,6 +29,14 @@ describe('codegen', () => {
     assert.match(ops, /op\.sqlTemplate\(`/)
     assert.match(ops, /import \{ connect, op, SynthigyError \} from/)
   })
+
+  it('types operations from the IR, outside the entity Pick and the Sel', () => {
+    const ops = generate()
+    assert.match(ops, /export type MovieList = Pick<_Movie, "xid" \| "title" \| "release_year"> & \{/)
+    assert.match(ops, /\n  votes: number\n  cast_size: number\n  rating: number \| null\n/)
+    const sel = ops.slice(ops.indexOf('export const MovieListSel'), ops.indexOf('} as const'))
+    assert.doesNotMatch(sel, /votes|rating/)
+  })
 })
 
 describe('warnStaleSchema', () => {

@@ -58,25 +58,37 @@ Pass them as a plain object: `{ since: 1990, q: "%star%" }`.
 
 ## Aggregates without shipping rows
 
-`_count` and `_agg` compute in the database — no child rows cross the wire.
+Operations compute in the database — no child rows cross the wire. Each is a
+line `alias: op(argument)`; the alias is required and is the result key.
 
 ```
-movie (limit 20)
+movie (limit 20, order by votes desc)
   title
-  _count
-    ratings:movie_ratings      # count of the movie_ratings relation, aliased "ratings"
-    actors:actors
-  _agg
-    ratings:movie_ratings
-      value: avg               # avg(value) over movie_ratings
+  votes: count(movie_ratings)
+  cast: count(actors)
+  rating: avg(movie_ratings.value)
+  fans: count(movie_ratings.value >= 4)
+  verified: avg(movie_ratings.value, movie_ratings.verified = true)
+  scores: count(distinct movie_ratings.value)
 ```
 
 Result:
 
 ```json
-{ "title": "…", "_count": { "ratings": 42, "actors": 7 },
-  "_agg": { "ratings": { "value": { "avg": 4.3 } } } }
+{ "title": "…", "votes": 42, "cast": 7, "rating": 4.3, "fans": 30,
+  "verified": 4.4, "scores": 5 }
 ```
+
+- `count(rel)` counts related rows; `count(<predicate>)` counts the ones that
+  match; `count(distinct rel.field)` counts distinct values.
+- `sum`, `avg`, `min`, `max` take `rel.field`; a second argument filters the
+  related rows. Every path in a filter starts with the operation's relation.
+- Counts are never null (0 for no rows); the others are null when no row
+  has a value. `sum` / `avg` arrive as numbers, `min` / `max` keep the
+  field's type.
+- `order by` takes an alias (`order by votes desc`) and related attributes
+  (`order by studio.name`).
+- Operations work under relations too, at any level.
 
 ## Relations: inner, left and none
 

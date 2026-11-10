@@ -19,10 +19,11 @@ function respond(status, body, headers = {}) {
   }
 }
 
-function client() {
+function client(extra = {}) {
   return createClient({
     endpoint: 'http://files.test',
     token: 'tok',
+    ...extra,
     fetch: async (url, init) => {
       calls.push({ url: String(url), init })
       return responses.shift()
@@ -85,6 +86,39 @@ describe('files.put', () => {
     await assert.rejects(c.files.put('/a/b.txt', 'x'), (e) =>
       e instanceof SynthigyError && e.code === 'FOLDER_NOT_FOUND' && e.category === 'not_found' && e.status === 404 && e.requestId === 'r1')
     await assert.rejects(c.files.put('/a/b.txt', 'x', { ifMatch: 'old' }), (e) => e.code === 'FILE_CHANGED' && e.category === 'conflict')
+  })
+})
+
+describe('files timeout', () => {
+  it('a configured timeout covers file calls but not their bytes', async () => {
+    const c = createClient({
+      endpoint: 'http://files.test', token: 'tok', timeout: 50,
+      fetch: async (url, init) => { calls.push({ url: String(url), init }); return responses.shift() },
+    })
+    responses.push(respond(200, info), respond(200, 'abc'), respond(200, info), respond(200, 'PK'))
+    await c.files.info(X)
+    await c.files.download(X)
+    await c.files.put(X, 'v2')
+    await c.files.zip({ files: [X] })
+    assert.deepEqual(calls.map((x) => Boolean(x.init.signal)), [true, false, false, false])
+  })
+})
+
+describe('files.zip', () => {
+  it('posts files and folders as xids or paths, and reads the zip like download', async () => {
+    responses.push(respond(200, 'PK'))
+    const out = await client().files.zip({ files: [X, '/a/r.txt', info], folders: ['/site/img/', { xid: F, path: '/docs/' }] }, { as: 'text' })
+    assert.equal(out, 'PK')
+    const { url, init } = calls[0]
+    assert.equal(url, 'http://files.test/files/zip')
+    assert.equal(init.method, 'POST')
+    assert.equal(init.headers['Content-Type'], 'application/json')
+    assert.deepEqual(JSON.parse(init.body), { files: [X, '/a/r.txt', X], folders: ['/site/img/', '/docs/'] })
+  })
+
+  it('turns an oversized zip into ZIP_TOO_LARGE', async () => {
+    responses.push(respond(413, { error: { code: 'ZIP_TOO_LARGE', message: 'too big', details: { files: 20001 } } }))
+    await assert.rejects(client().files.zip({ folders: ['/'] }), (e) => e.code === 'ZIP_TOO_LARGE')
   })
 })
 
@@ -244,6 +278,47 @@ describe('files links', () => {
     assert.equal(c.files.url("/site/my logo+1 (č)*.png"), 'http://files.test/files/path/site/my%20logo%2B1%20%28%C4%8D%29%2A.png')
     assert.throws(() => c.files.url('/site/'), (e) => e.code === 'INVALID_PATH')
     assert.equal(calls.length, 0)
+  })
+
+  it('link, links and unlink: one request each, snake_case on the wire', async () => {
+    const made = { xid: F, file: X, url: 'http://files.test/files/link/t', downloads: 0, max_downloads: 2, inline: true }
+    responses.push(respond(200, info), respond(201, made), respond(200, { file: X, links: [made] }), respond(204), respond(204))
+    const c = client()
+    assert.equal((await c.files.link('/a.txt', { expires: 600, maxDownloads: 2, inline: true })).url, made.url)
+    assert.equal((await c.files.links(X))[0].xid, F)
+    await c.files.unlink(made)
+    await c.files.unlink(F)
+    assert.deepEqual(calls.map((x) => [x.init.method, x.url]), [
+      ['GET', 'http://files.test/files/info?path=%2Fa.txt'],
+      ['POST', `http://files.test/files/${X}/links`],
+      ['GET', `http://files.test/files/${X}/links`],
+      ['DELETE', `http://files.test/files/links/${F}`],
+      ['DELETE', `http://files.test/files/links/${F}`],
+    ])
+    assert.deepEqual(JSON.parse(calls[1].init.body), { expires: 600, max_downloads: 2, inline: true })
+  })
+
+  it('link refusals carry their categories; canLink goes out as can_link', async () => {
+    responses.push(respond(403, { error: { code: 'LINKS_DISABLED', message: 'off' } }),
+      respond(400, { error: { code: 'INVALID_EXPIRES', message: 'bad' } }),
+      respond(200, { xid: F, path: '/s/' }))
+    const c = client()
+    await assert.rejects(c.files.link(X), (e) => e.code === 'LINKS_DISABLED' && e.category === 'iam')
+    await assert.rejects(c.files.link(X, { expires: 0 }), (e) => e.code === 'INVALID_EXPIRES' && e.category === 'validation')
+    await c.files.folder('/s/', { canLink: true, cache: 60 })
+    assert.deepEqual(JSON.parse(calls[2].init.body), { cache: 60, can_link: true })
+  })
+
+  it('keyFormat reaches /files as key_format; snake sends none', async () => {
+    responses.push(respond(200, { xid: X }), respond(200, { xid: X }), respond(200, { file: X, links: [] }))
+    await client({ keyFormat: 'camel' }).files.info(X)
+    await client({ keyFormat: 'snake' }).files.info(X)
+    await client({ keyFormat: 'camel' }).files.links(X)
+    assert.deepEqual(calls.map((x) => x.url), [
+      `http://files.test/files/${X}/info?key_format=camel`,
+      `http://files.test/files/${X}/info`,
+      `http://files.test/files/${X}/links?key_format=camel`,
+    ])
   })
 
   it('objectUrl gives a blob: URL and a revoke', async () => {

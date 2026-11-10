@@ -256,8 +256,33 @@ export interface FolderInfo {
   public: boolean
   /** Seconds browsers and CDNs may keep the files, set the same way; null: they check every time. */
   cache: number | null
+  /** Files here may be shared by link, set the same way; off unless a folder says true. */
+  can_link: boolean
   /** What is set on this folder itself (null: inherited); `folder(path, settings)` writes these. */
-  settings: { public: boolean | null; cache: number | null }
+  settings: { public: boolean | null; cache: number | null; can_link: boolean | null }
+}
+
+export interface FileLinkOpts {
+  /** Seconds the link lives: default 3600, at most 604800 (7 days). */
+  expires?: number
+  /** Downloads it allows; each GET is a whole download and ranges are ignored. Unset: unlimited. */
+  maxDownloads?: number
+  /** Open in the browser instead of downloading. */
+  inline?: boolean
+}
+
+export interface FileLink {
+  xid: string
+  /** The file's xid. */
+  file: string
+  /** Who made it; the link works while they can read the file. */
+  created_by: string
+  expires_at: string
+  max_downloads: number | null
+  downloads: number
+  inline: boolean
+  /** Only on the link `link()` just made: it cannot be read back later. */
+  url?: string
 }
 
 export interface FilePutOpts {
@@ -326,6 +351,8 @@ export interface FolderSettings {
   public?: boolean | null
   /** Seconds browsers and CDNs may keep the files; null: inherit. */
   cache?: number | null
+  /** Files here may be shared by link (off unless a folder says true); File Admin sets it; null: inherit. */
+  canLink?: boolean | null
 }
 
 export type FolderAccess = 'read' | 'write' | 'delete'
@@ -346,6 +373,8 @@ export interface FilesApi {
   put(target: string | { xid: string } | { name: string }, data: FileBody, opts?: FilePutOpts): Promise<FileInfo>
   /** The bytes; null when `ifNoneMatch` still matches. */
   download<A extends FileDownloadAs = 'blob'>(file: FileRef, opts?: FileDownloadOpts<A>): Promise<FileDownloadResult<A> | null>
+  /** One zip of the files and of everything inside the folders, read as you; what you can't read is listed in its `_skipped.txt`. */
+  zip<A extends Exclude<FileDownloadAs, 'json'> = 'blob'>(refs: { files?: FileRef[]; folders?: FolderRef[] }, opts?: { as?: A; signal?: AbortSignal }): Promise<FileDownloadResult<A>>
   /** The file, or null when it is not there or you can't see it. */
   info(file: FileRef): Promise<FileInfo | null>
   /** A folder's files and subfolders; `null`: files in no folder; nothing: every file you can see, newest first. */
@@ -358,7 +387,7 @@ export interface FilesApi {
   url(file: FileRef, opts?: { inline?: boolean }): string
   /** Rename or move; for a file, a `to` ending in / keeps the name. */
   move(from: FileRef | FolderRef, to: string): Promise<FileInfo | FolderInfo>
-  /** The folder at `path`, made with every missing folder above it; `settings` sets its Public and Cache. */
+  /** The folder at `path`, made with every missing folder above it; `settings` sets its public, cache and canLink. */
   folder(path: string, settings?: FolderSettings): Promise<FolderInfo>
   /** Give users and groups an access on a folder; writers of the folder may. */
   share(folder: FolderRef, access: FolderAccess, to: Grantees): Promise<void>
@@ -370,6 +399,12 @@ export interface FilesApi {
   versions(file: FileRef): Promise<FileVersion[]>
   /** Make a kept version current again (VERSION_EXPIRED when it is gone). */
   restore(file: FileRef, version: number | { id: number }): Promise<FileInfo>
+  /** A link that downloads the file without signing in, where its folder allows links. */
+  link(file: FileRef, opts?: FileLinkOpts): Promise<FileLink & { url: string }>
+  /** The file's live links you can see: your own, or all for File Admin. */
+  links(file: FileRef): Promise<FileLink[]>
+  /** End a link (the link or its xid) at once, on every engine. */
+  unlink(link: string | { xid: string }): Promise<void>
   /** Browser: a blob: URL of the bytes, downloaded with your token; call revoke when done. */
   objectUrl(file: FileRef, opts?: { signal?: AbortSignal }): Promise<{ url: string; revoke(): void }>
   /** Server: answer a browser's request with the file (Range, If-None-Match, ETag and type pass through). */
@@ -499,11 +534,12 @@ export type SynthigyErrorCode =
   | 'CHECK_VIOLATION' | 'TYPE_CAST_FAILURE' | 'TIMEOUT'
   | 'HTTP_ERROR' | 'OPERATION_ERROR' | 'INTERNAL_ERROR'
   | 'FILE_NOT_FOUND' | 'FOLDER_NOT_FOUND' | 'FILE_NAME_TAKEN' | 'FILE_CHANGED'
-  | 'FILE_NOT_READY' | 'FILE_TOO_LARGE' | 'NAME_REQUIRED' | 'UNSUPPORTED_MEDIA_TYPE'
-  | 'RANGE_NOT_SATISFIABLE' | 'FILES_UNAVAILABLE' | 'AUDIT_UNAVAILABLE'
+  | 'FILE_NOT_READY' | 'FILE_TOO_LARGE' | 'ZIP_TOO_LARGE' | 'NAME_REQUIRED' | 'UNSUPPORTED_MEDIA_TYPE'
+  | 'RANGE_NOT_SATISFIABLE' | 'FILES_UNAVAILABLE' | 'AUDIT_UNAVAILABLE' | 'FILES_MIGRATING'
   | 'FOLDER_NOT_EMPTY' | 'FOLDER_NAME_TAKEN' | 'FOLDER_CYCLE' | 'INVALID_NAME' | 'INVALID_ACCESS'
   | 'VERSION_EXPIRED' | 'INVALID_PATH' | 'INVALID_SETTINGS' | 'INVALID_QUERY'
   | 'METHOD_NOT_ALLOWED' | 'NOT_FOUND' | 'ENGINE_OWNED' | 'INVALID_SLICE'
+  | 'LINKS_DISABLED' | 'LINK_NOT_FOUND' | 'INVALID_EXPIRES'
   | (string & {})
 
 /** `whoami()` — the identity a call runs as. `client` is null in-process (no OAuth client). */
@@ -602,7 +638,9 @@ export interface ClientConfig {
   /**
    * Request timeout in milliseconds. Applied to all one-shot requests (exec,
    * subscribe, etc.) via `AbortSignal.timeout`. Not applied when the call
-   * already carries an AbortSignal (e.g. listen() with opts.signal).
+   * already carries an AbortSignal (e.g. listen() with opts.signal), nor to
+   * file bytes (`files.put`, `download`, `zip`, `serve`): a large file takes
+   * as long as it takes; bound those with their own `signal`.
    * Requires Node ≥ 17.3 / modern browsers.
    */
   timeout?: number

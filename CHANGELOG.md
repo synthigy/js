@@ -3,6 +3,37 @@
 All notable changes to `@synthigy/sdk`. Follows [semver](https://semver.org).
 Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.2.4
+
+Needs an engine with `POST /files/zip` (after v0.4.1).
+
+### Breaking
+- **`_count` / `_agg` are gone** (engine after v0.4.1 refuses them).
+  Write an operation per value: XSQL `votes: count(ratings)`,
+  `rating: avg(ratings.value)`; on the wire an `{alias, op, args?}` entry
+  on the relation key. The alias is the result key and can be sorted by.
+- `synthigy-gen` types an operation as a plain field (counts `int`, never null;
+  `avg` float; `sum`/`min`/`max` the field's type). The `_count` / `_agg`
+  map fields are gone; regenerate.
+
+### Added
+- **`files.zip({ files, folders }, { as })`**: one zip of the files and of
+  everything inside the folders, read as you; `as` as in `download`.
+  `ZIP_TOO_LARGE` joins the error codes.
+- **`files.link(file, { expires, maxDownloads, inline })`**, `files.links(file)`,
+  `files.unlink(link | xid)`: download links for people without an account, where
+  the folder's `canLink` allows them; `files.folder(path, { canLink })`.
+  `LINKS_DISABLED`, `LINK_NOT_FOUND` and `INVALID_EXPIRES` join the error codes.
+
+- `files` answers follow the client's `keyFormat`, as `/data` results do
+  (needs an engine that reads `key_format` on `/files`).
+
+### Fixed
+- A configured `timeout` no longer cuts file bytes short: `files.put`,
+  `download` and `zip` (like `serve` already) run as long as the transfer
+  takes; bound them with their own `signal`.
+- `FILES_MIGRATING` (uploads paused while the server moves files to a new store) is now category `internal` and retryable; it was unknown, so never retryable.
+
 ## 0.2.3
 
 Needs engine v0.4.1 or newer for files.

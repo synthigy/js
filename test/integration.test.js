@@ -97,8 +97,8 @@ describe('integration', { skip }, () => {
     })
   })
 
-  // Counting/aggregation is done via sqlTemplate (or XSQL _count/_agg
-  // selections) — there is no `count`/`aggregate` /data op (deprecated).
+  // Counting/aggregation is done via sqlTemplate (or selection operations,
+  // `votes: count(ratings)`) — there is no `count`/`aggregate` /data op.
   describe('sqlTemplate', () => {
     it('executes a basic count query', async () => {
       const rows = await client.sqlTemplate(

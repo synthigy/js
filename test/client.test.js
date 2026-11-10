@@ -715,25 +715,21 @@ describe('selection normalization', () => {
     })
   })
 
-  it('does not inject _join into _count / _agg subtrees', async () => {
+  it('sends operation entries as written', async () => {
     const client = createClient({ endpoint: 'http://localhost', token: 't' })
+    const ratings = [
+      { alias: 'votes', op: 'count' },
+      { alias: 'rating', op: { avg: 'value' }, args: { _where: { verified: { _eq: true } } } },
+      rel({ value: null }, { _limit: 3 }, 'recent'),
+    ]
 
     mockFetch.mock.mockImplementation(async (url, opts) => {
       const body = JSON.parse(opts.body)
-      assert.deepEqual(body.operations[0].selections, {
-        title: null,
-        // aggregate operators keep their LEFT-by-construction shape, no sugar
-        _count: [{ selections: { actors: null } }],
-        _agg: [{ selections: { ratings: [{ selections: { rating: [{ selections: { _avg: null } }] } }] } }],
-      })
+      assert.deepEqual(body.operations[0].selections, { title: null, ratings })
       return mockResponse(200, { results: [{ data: [], ok: true }] })
     })
 
-    await client.search('Movie', {}, {
-      title: null,
-      _count: { actors: null },
-      _agg: { ratings: { rating: { _avg: null } } },
-    })
+    await client.search('Movie', {}, { title: null, ratings })
   })
 })
 

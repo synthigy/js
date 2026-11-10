@@ -72,6 +72,15 @@ const [now, previous] = await files.versions(file)    // the last ten
 await files.download(file, { version: previous })
 await files.restore(file, previous)                   // current again; no bytes copied
 
+// one zip of files and whole folders, read as you; what you can't read is listed in _skipped.txt
+const zip = await files.zip({ folders: ['/site/img/'], files: ['/notes/today.txt'] })   // a Blob
+
+// a link for someone without an account: no sign-in, ends on its own
+const link = await files.link('/reports/q3.pdf', { expires: 86400, maxDownloads: 3 })
+link.url                                              // https://…/files/link/<token>, shown only now
+await files.links('/reports/q3.pdf')                  // live links you can see (File Admin: all)
+await files.unlink(link)                              // or its xid; ends at once, on every engine
+
 // browser: a private file in <img> or <iframe>
 const { url, revoke } = await files.objectUrl(file)
 
@@ -84,6 +93,11 @@ export async function GET(request) {
 `serve` passes `Range`, `If-None-Match` and `If-Range` to the server and
 answers with its status, type, length, `ETag`, name and `Cache-Control`; a
 refusal (404, 403) comes back as the server's own answer.
+
+`zip` keeps a folder's files under the folder's name (`img/logo.png`,
+`img/icons/a.svg`), numbers repeated names (`a (2).txt`), and is named after
+a single folder (`img.zip`) or `files-<date>.zip`. `as` works as in `download`;
+`'stream'` hands you the zip as the server writes it.
 
 ## Public folders
 
@@ -106,6 +120,24 @@ in a public folder loads without one:
 A private file in the browser: `objectUrl` (downloads with your token), or
 your backend serves it (`serve`).
 
+## Links
+
+`link` hands one file to someone without an account, or to another
+service:
+
+- Only in folders where `canLink` is on: `files.folder('/reports/', {
+  canLink: true })`, File Admin's to set, inherited like `public`, off
+  everywhere until set. Files in no folder never.
+- File User and File Admin make links to files they can read; File Reader
+  cannot.
+- Every download checks that whoever made the link can still read the
+  file; taken off the folder, their links stop.
+- `expires` seconds, 3600 by default, at most 7 days. `maxDownloads`: each
+  GET is one whole download (ranges are ignored, so it cannot be fetched in
+  pieces past the limit).
+- An expired, used-up, revoked or wrong link is `LINK_NOT_FOUND`.
+- The `url` cannot be read back later: only a hash of its token is stored.
+
 ## What a file looks like
 
 ```js
@@ -122,6 +154,10 @@ your backend serves it (`serve`).
   public: false                 // loads without a token
 }
 ```
+
+Keys are snake_case as above. A client made with `keyFormat: 'camel'` (or `kebab`)
+gets them in that case here too: `contentType`, `uploadedAt`, `canLink`, `maxDownloads`.
+The TypeScript types describe the snake_case shape.
 
 ## Rules worth knowing
 
@@ -140,8 +176,9 @@ your backend serves it (`serve`).
   the server guesses from the name. Never send
   `application/x-www-form-urlencoded`: such a body is parsed as a form and
   never stored (`UNSUPPORTED_MEDIA_TYPE`).
-- **Size**: one request carries up to the server's limit (25 MB by default,
-  `SYNTHIGY_SERVER_MAX_BODY`); more is `FILE_TOO_LARGE`.
+- **Size**: no limit on the Enso and Jetty servers; on http-kit one request
+  carries up to `SYNTHIGY_HTTPKIT_MAX_BODY` (25 MB by default), refused with a
+  plain 413.
 - **Versions**: the last ten are kept; older ones are `VERSION_EXPIRED`.
   Deleted files keep their bytes for 30 days on the server.
 
@@ -157,6 +194,7 @@ your backend serves it (`serve`).
 | `FILE_TOO_LARGE` | validation | over the server's request limit |
 | `UNSUPPORTED_MEDIA_TYPE` | validation | a form-encoded body |
 | `RANGE_NOT_SATISFIABLE` | validation | a range past the end of the file |
+| `ZIP_TOO_LARGE` | validation | a zip over the server's total size or file count; `details` has both |
 | `INVALID_PATH` | validation | not a file path (`/folder/name`), or not a folder path |
 | `INVALID_SETTINGS` | validation | `public` not true/false, `cache` not whole seconds |
 | `INVALID_NAME` | validation | empty, over 255 characters, `/` `\` or control characters, `.`/`..` |
@@ -169,10 +207,11 @@ your backend serves it (`serve`).
 | `VERSION_EXPIRED` | not_found | a version that is no longer kept |
 | `FORBIDDEN` | iam | your roles or the folder's access list refuse it |
 | `ATTRIBUTE_FORBIDDEN` | iam | your roles may not set that folder setting |
+| `LINKS_DISABLED` | iam | the file's folder does not allow links, or it is in no folder |
+| `LINK_NOT_FOUND` | not_found | no such link you can see |
+| `INVALID_EXPIRES` | validation | `expires` not whole seconds from 1 to 604800 |
 
 ## Not yet
 
 - Upload progress: `fetch` reports none. Use `XMLHttpRequest` against
   `PUT /files?path=…` if you need a progress bar.
-- Files over the request limit (chunked uploads).
-- Links that expire, for private files.
