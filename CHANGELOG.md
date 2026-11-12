@@ -3,6 +3,35 @@
 All notable changes to `@synthigy/sdk`. Follows [semver](https://semver.org).
 Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.3.0
+
+Needs engine v0.5.0 or later.
+
+### Breaking
+- **No client-wide `actingAs`.** `createClient({ actingAs })` throws
+  `CONFIG_ERROR`: the client runs as itself and a call acts as a user only when
+  it passes `{ actingAs }`.
+
+### Added
+- **`actingAs` on every `files` call** (`put`, `download`, `zip`, `info`,
+  `list`, `search`, `delete`, `move`, `folder`, `share`, `unshare`, `access`,
+  `versions`, `restore`, `link`, `links`, `unlink`, `objectUrl`, `serve`): sent
+  as `X-Acting-As`, so a trusted BFF works on files as the user, like `/data`.
+
+### Fixed
+- `watchQuery.xsql` (and generated `watch*` ops) ignored `searchOpts`:
+  `actingAs` never reached `client.query`, so live XSQL lists ran as the
+  client itself and skipped the acted-as user's RLS. `searchOpts` is now
+  lifted to the top level of the query options, like the search variant.
+- `watchQuery` / `watchQuery.xsql` (and generated `watch*` ops) never refreshed
+  when a row in the result changed: the engine sends `record/insert|update|delete`
+  for the watched rows and the live query only reacted to `entity/*` and
+  `relation/*`. Same trigger set as `watchSqlTemplate` now.
+- A write right after `watchQuery` / `watchSqlTemplate` opened could be missed:
+  `ready()` resolved before the engine held the subscription. `ready()` now waits
+  for it and refetches once, so the list includes anything written in between.
+  New `watch.subscribed()`.
+
 ## 0.2.4
 
 Needs an engine with `POST /files/zip` (after v0.4.1).

@@ -85,8 +85,8 @@ export const not = (clause) => ({ _not: clause })
  * Use rel() when you need args, alias, or multiple occurrences:
  *   { roles: rel({ name: null }, { _limit: 5 }) }
  *   { roles: [
- *       rel({ name: null }, { _where: { active: { _eq: true } } }, "activeRoles"),
- *       rel({ name: null }, { _where: { active: { _eq: false } } }, "archived")
+ *       rel({ name: null }, { active: { _eq: true } }, "activeRoles"),
+ *       rel({ name: null }, { active: { _eq: false } }, "archived")
  *   ]}
  *
  * @param {Object} selections - Attribute selections for the relation
@@ -951,9 +951,6 @@ class SynthigyClient {
    * NO_TOKEN and whose message teaches the fix. A browser has neither
    * env vars nor a stdio parent, so it always requires an explicit source.
    * @param {string} [config.scope] - OAuth scopes
-   * @param {string} [config.actingAs] - Default impersonation target — applied
-   *                                     to every request unless overridden
-   *                                     per-call. Useful for per-session clients.
    * @param {'kebab'|'snake'|'camel'} [config.keyFormat] - Default key-case for
    *                                     response payloads. Server defaults to
    *                                     snake_case; set "kebab" for kebab-case
@@ -980,7 +977,10 @@ class SynthigyClient {
     }
     this._endpoint = endpoint.replace(/\/$/, '')
     this._dataUrl = `${this._endpoint}/data`
-    this._defaultActingAs = config.actingAs ?? null
+    if (config.actingAs !== undefined) {
+      throw new SynthigyError('actingAs is a per-call option: the client runs as itself and a call acts as a user only when it passes { actingAs }',
+        'CONFIG_ERROR')
+    }
     this._defaultKeyFormat = config.keyFormat ?? null
     this._timeout = config.timeout ?? null
     this._fetch = config.fetch ?? globalThis.fetch.bind(globalThis)
@@ -1203,7 +1203,7 @@ class SynthigyClient {
    */
   async exec(operations, opts) {
     const body = { operations }
-    const actingAs = opts?.actingAs ?? this._defaultActingAs
+    const actingAs = opts?.actingAs
     if (actingAs) body.acting_as = actingAs
     const keyFormat = opts?.keyFormat ?? this._defaultKeyFormat
     if (keyFormat) body.key_format = keyFormat
@@ -1229,7 +1229,7 @@ class SynthigyClient {
    * Search for multiple entities.
    *
    * @param {string} entity - Entity name (e.g., 'user', 'iam/user')
-   * @param {Object} args - Query arguments ({ _where, _limit, _offset, _order_by, _distinct, ...fieldConditions })
+   * @param {Object} args - Query arguments (field conditions plus _and, _or, _not, _limit, _offset, _order_by, _distinct)
    * @param {Object} selection - Attributes and relations to return
    * @returns {Promise<Array>} Array of entity records
    *
@@ -2143,7 +2143,8 @@ class SynthigyClient {
   }
 
   /** @private */
-  async _filesFetch(path, fetchOpts = {}, { bytes = false } = {}) {
+  async _filesFetch(path, fetchOpts = {}, { bytes = false, actingAs } = {}) {
+    if (actingAs) fetchOpts = { ...fetchOpts, headers: { ...fetchOpts.headers, 'X-Acting-As': actingAs } }
     const kf = this._defaultKeyFormat
     const cased = kf && kf !== 'snake' ? `${path.includes('?') ? '&' : '?'}key_format=${kf}` : ''
     const resp = await this._fetchAuth(`${this._endpoint}/files${path}${cased}`, fetchOpts, { applyTimeout: !bytes })
@@ -2205,11 +2206,11 @@ class SynthigyClient {
         const r = folderRef(ref)
         return isPath(r) ? `/folders${tail}${query({ path: r })}` : `/folders/${encodeURIComponent(r)}${tail}`
       }
-      const json = async (path, method, payload) => {
+      const json = async (path, method, payload, opts = {}) => {
         const resp = await self._filesFetch(path, {
           method,
           ...(payload !== undefined && { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
-        })
+        }, { actingAs: opts.actingAs })
         return resp.status === 204 ? undefined : resp.json()
       }
       const read = async (resp, as) => {
@@ -2222,9 +2223,9 @@ class SynthigyClient {
           default: return resp.blob()
         }
       }
-      const xidAt = async (ref) => {
+      const xidAt = async (ref, opts = {}) => {
         if (!isPath(ref)) return xidOf(ref)
-        const file = await self.files.info(ref)
+        const file = await self.files.info(ref, { actingAs: opts.actingAs })
         if (!file) throw new SynthigyError(`No such file: ${ref}`, 'FILE_NOT_FOUND', undefined, { status: 404 })
         return file.xid
       }
@@ -2247,7 +2248,7 @@ class SynthigyClient {
           const resp = await self._filesFetch(path, {
             method, signal: opts.signal, ...rest,
             headers: { ...headers, ...(expected && { 'If-Match': `"${expected}"` }) },
-          }, { bytes: true })
+          }, { bytes: true, actingAs: opts.actingAs })
           return resp.json()
         },
 
@@ -2264,8 +2265,8 @@ class SynthigyClient {
           if (opts.ifNoneMatch) headers['If-None-Match'] = `"${opts.ifNoneMatch}"`
           const path = opts.version === undefined
             ? fileAt(ref)
-            : `/${encodeURIComponent(await xidAt(ref))}/versions/${encodeURIComponent(opts.version?.id ?? opts.version)}`
-          const resp = await self._filesFetch(path, { method: 'GET', headers, signal: opts.signal }, { bytes: true })
+            : `/${encodeURIComponent(await xidAt(ref, opts))}/versions/${encodeURIComponent(opts.version?.id ?? opts.version)}`
+          const resp = await self._filesFetch(path, { method: 'GET', headers, signal: opts.signal }, { bytes: true, actingAs: opts.actingAs })
           if (resp.status === 304) return null
           return read(resp, opts.as)
         },
@@ -2282,14 +2283,14 @@ class SynthigyClient {
             signal: opts.signal,
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ files: files.map(fileRef), folders: folders.map(folderRef) }),
-          }, { bytes: true })
+          }, { bytes: true, actingAs: opts.actingAs })
           return read(resp, opts.as)
         },
 
         /** The file, or null when it is not there or you cannot see it. */
-        async info(ref) {
+        async info(ref, opts = {}) {
           try {
-            return await (await self._filesFetch(fileAt(ref, '/info'), { method: 'GET' })).json()
+            return await (await self._filesFetch(fileAt(ref, '/info'), { method: 'GET' }, { actingAs: opts.actingAs })).json()
           } catch (err) {
             if (err instanceof SynthigyError && (err.code === 'FILE_NOT_FOUND' || err.code === 'FOLDER_NOT_FOUND')) return null
             throw err
@@ -2302,13 +2303,14 @@ class SynthigyClient {
          */
         async list(folder, opts = {}) {
           const page = { q: opts.q, limit: opts.limit, offset: opts.offset }
-          const files = async (params) => (await (await self._filesFetch(query(params), { method: 'GET' })).json()).files
+          const as = { actingAs: opts.actingAs }
+          const files = async (params) => (await (await self._filesFetch(query(params), { method: 'GET' }, as)).json()).files
           if (folder === undefined) return { files: await files(page), folders: [] }
           if (folder === null) return { files: await files({ ...page, folderless: 'true' }), folders: [] }
           const ref = folderRef(folder)
           const [found, folders] = await Promise.all([
             files({ ...page, folder: ref }),
-            self._filesFetch(`/folders${query({ parent: ref })}`, { method: 'GET' }).then((r) => r.json()).then((b) => b.folders),
+            self._filesFetch(`/folders${query({ parent: ref })}`, { method: 'GET' }, as).then((r) => r.json()).then((b) => b.folders),
           ])
           const words = (opts.q ?? '').trim().split(/\s+/).filter(Boolean)
           const holds = new RegExp(words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*'), 'i')
@@ -2321,12 +2323,12 @@ class SynthigyClient {
          */
         async search(q, opts = {}) {
           const params = { q, folder: opts.folder === undefined ? undefined : folderRef(opts.folder), limit: opts.limit, offset: opts.offset }
-          return (await self._filesFetch(`/search${query(params)}`, { method: 'GET', signal: opts.signal })).json()
+          return (await self._filesFetch(`/search${query(params)}`, { method: 'GET', signal: opts.signal }, { actingAs: opts.actingAs })).json()
         },
 
         /** Delete a file, or an empty folder (a path ending in / or the folder itself). */
-        async delete(ref) {
-          await self._filesFetch(isFolder(ref) ? folderAt(ref) : fileAt(ref), { method: 'DELETE' })
+        async delete(ref, opts = {}) {
+          await self._filesFetch(isFolder(ref) ? folderAt(ref) : fileAt(ref), { method: 'DELETE' }, { actingAs: opts.actingAs })
         },
 
         /**
@@ -2349,50 +2351,50 @@ class SynthigyClient {
          * Rename or move. A file goes to `to` ('/a/new.png'), or into a folder
          * when `to` ends in / (the name stays); a folder's `to` is its new path.
          */
-        async move(from, to) {
+        async move(from, to, opts = {}) {
           if (!isPath(to)) throw new SynthigyError('move takes the new path, for example /site/brand/logo.png', 'INVALID_PATH')
           if (isFolder(from)) {
             const parts = to.split('/').filter(Boolean)
             const name = parts.pop()
             if (!name) throw new SynthigyError('a folder moves to a path like /archive/2026/', 'INVALID_PATH')
-            return json(folderAt(from), 'PATCH', { name, parent: parts.length ? `/${parts.join('/')}/` : '/' })
+            return json(folderAt(from), 'PATCH', { name, parent: parts.length ? `/${parts.join('/')}/` : '/' }, opts)
           }
           const cut = to.lastIndexOf('/')
           return json(fileAt(from), 'PATCH',
-            to.endsWith('/') ? { folder: to } : { folder: to.slice(0, cut + 1), name: to.slice(cut + 1) })
+            to.endsWith('/') ? { folder: to } : { folder: to.slice(0, cut + 1), name: to.slice(cut + 1) }, opts)
         },
 
         /** The folder at `path`, made with every missing folder above it; `settings` sets its public, cache and canLink. */
-        async folder(path, settings) {
+        async folder(path, settings, opts = {}) {
           const { canLink, ...rest } = settings ?? {}
-          return json(`/folders${query({ path })}`, 'PUT', canLink === undefined ? rest : { ...rest, can_link: canLink })
+          return json(`/folders${query({ path })}`, 'PUT', canLink === undefined ? rest : { ...rest, can_link: canLink }, opts)
         },
 
         /** Give users and groups (xids or records) an access on a folder; writers of the folder may. */
-        async share(folder, access, to) {
-          await json(folderAt(folder, '/share'), 'POST', { access, ...grantees(to) })
+        async share(folder, access, to, opts = {}) {
+          await json(folderAt(folder, '/share'), 'POST', { access, ...grantees(to) }, opts)
         },
 
         /** Take an access on a folder away from users and groups. */
-        async unshare(folder, access, from) {
-          await json(folderAt(folder, '/unshare'), 'POST', { access, ...grantees(from) })
+        async unshare(folder, access, from, opts = {}) {
+          await json(folderAt(folder, '/unshare'), 'POST', { access, ...grantees(from) }, opts)
         },
 
         /** Who holds read, write and delete on a folder. */
-        async access(folder) {
-          return (await self._filesFetch(folderAt(folder, '/access'), { method: 'GET' })).json()
+        async access(folder, opts = {}) {
+          return (await self._filesFetch(folderAt(folder, '/access'), { method: 'GET' }, { actingAs: opts.actingAs })).json()
         },
 
         /** The kept versions (the last ten), newest first. */
-        async versions(ref) {
-          return (await (await self._filesFetch(`/${encodeURIComponent(await xidAt(ref))}/versions`, { method: 'GET' })).json()).versions
+        async versions(ref, opts = {}) {
+          return (await (await self._filesFetch(`/${encodeURIComponent(await xidAt(ref, opts))}/versions`, { method: 'GET' }, { actingAs: opts.actingAs })).json()).versions
         },
 
         /** Make a kept version current again; the bytes are not copied. */
-        async restore(ref, version) {
+        async restore(ref, version, opts = {}) {
           const id = version?.id ?? version
-          return (await self._filesFetch(`/${encodeURIComponent(await xidAt(ref))}/versions/${encodeURIComponent(id)}/restore`,
-            { method: 'POST' })).json()
+          return (await self._filesFetch(`/${encodeURIComponent(await xidAt(ref, opts))}/versions/${encodeURIComponent(id)}/restore`,
+            { method: 'POST' }, { actingAs: opts.actingAs })).json()
         },
 
         /**
@@ -2401,26 +2403,26 @@ class SynthigyClient {
          * `maxDownloads`, `inline`. Its `url` is shown only now.
          */
         async link(ref, opts = {}) {
-          return json(`/${encodeURIComponent(await xidAt(ref))}/links`, 'POST', {
+          return json(`/${encodeURIComponent(await xidAt(ref, opts))}/links`, 'POST', {
             ...(opts.expires !== undefined && { expires: opts.expires }),
             ...(opts.maxDownloads !== undefined && { max_downloads: opts.maxDownloads }),
             ...(opts.inline !== undefined && { inline: opts.inline }),
-          })
+          }, opts)
         },
 
         /** The file's live links you can see: your own, or all of them for File Admin. */
-        async links(ref) {
-          return (await json(`/${encodeURIComponent(await xidAt(ref))}/links`, 'GET')).links
+        async links(ref, opts = {}) {
+          return (await json(`/${encodeURIComponent(await xidAt(ref, opts))}/links`, 'GET', undefined, opts)).links
         },
 
         /** End a link (the link or its xid) at once, on every engine. */
-        async unlink(link) {
-          await json(`/links/${encodeURIComponent(typeof link === 'string' ? link : link.xid)}`, 'DELETE')
+        async unlink(link, opts = {}) {
+          await json(`/links/${encodeURIComponent(typeof link === 'string' ? link : link.xid)}`, 'DELETE', undefined, opts)
         },
 
         /** Browser: download with your token and get a blob: URL for <img> or <iframe>; call revoke when done. */
         async objectUrl(ref, opts = {}) {
-          const blob = await self.files.download(ref, { as: 'blob', signal: opts.signal })
+          const blob = await self.files.download(ref, { as: 'blob', signal: opts.signal, actingAs: opts.actingAs })
           const url = URL.createObjectURL(blob)
           return { url, revoke: () => URL.revokeObjectURL(url) }
         },
@@ -2436,6 +2438,7 @@ class SynthigyClient {
             const v = typeof request?.headers?.get === 'function' ? request.headers.get(k) : request?.headers?.[k]
             if (v) headers[k] = v
           }
+          if (opts.actingAs) headers['X-Acting-As'] = opts.actingAs
           const path = fileAt(ref)
           const url = `${self._endpoint}/files${path}${opts.inline ? `${path.includes('?') ? '&' : '?'}disposition=inline` : ''}`
           const resp = await self._fetchAuth(url, { method: request?.method === 'HEAD' ? 'HEAD' : 'GET', headers },

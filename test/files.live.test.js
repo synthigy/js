@@ -8,6 +8,7 @@
  *   SYNTHIGY_FILES_TEST_ADMIN_ID   SYNTHIGY_FILES_TEST_ADMIN_SECRET
  *   SYNTHIGY_FILES_TEST_USER_ID    SYNTHIGY_FILES_TEST_USER_SECRET
  *   SYNTHIGY_FILES_TEST_READER_ID  SYNTHIGY_FILES_TEST_READER_SECRET
+ *   SYNTHIGY_FILES_TEST_BFF_ID     SYNTHIGY_FILES_TEST_BFF_SECRET  (trusted, File Admin)
  */
 
 import { describe, it, before, after } from 'node:test'
@@ -38,7 +39,7 @@ async function rejectsCode(promise, code, category) {
 }
 
 describe('files live', { skip }, () => {
-  let admin, user, reader
+  let admin, user, reader, bff
   let userXid, readerXid
   let bin, json, note, loose
   const top = `/F-${RUN}/`
@@ -50,7 +51,7 @@ describe('files live', { skip }, () => {
       clientId: env[`SYNTHIGY_FILES_TEST_${role}_ID`],
       clientSecret: env[`SYNTHIGY_FILES_TEST_${role}_SECRET`],
     })
-    admin = mk('ADMIN'); user = mk('USER'); reader = mk('READER')
+    admin = mk('ADMIN'); user = mk('USER'); reader = mk('READER'); bff = mk('BFF')
   })
 
   after(async () => {
@@ -184,6 +185,21 @@ describe('files live', { skip }, () => {
       await rejectsCode(reader.files.put(`${top}r-${RUN}.bin`, BIN), 'FORBIDDEN', 'iam')
       await rejectsCode(reader.files.put(bin, NEXT), 'FORBIDDEN', 'iam')
       await rejectsCode(reader.files.folder(`${top}r-${RUN}/`), 'FORBIDDEN', 'iam')
+    })
+  })
+
+  describe('4b. a trusted client acting as the user and the reader', () => {
+    it('X-Acting-As narrows the call to that user', async () => {
+      assert.equal((await bff.files.info(loose.xid))?.xid, loose.xid, 'as itself (File Admin) it sees the loose file')
+      assert.equal(await bff.files.info(loose.xid, { actingAs: readerXid }), null)
+      assert.deepEqual(await bytesOf(await bff.files.download(bin.xid, { actingAs: readerXid })), BIN)
+      await rejectsCode(bff.files.put(`${top}bff-r-${RUN}.bin`, BIN, { actingAs: readerXid }), 'FORBIDDEN', 'iam')
+      const mine = await bff.files.put(`${top}bff-u-${RUN}.bin`, BIN, { actingAs: userXid })
+      assert.equal(mine.uploaded_by?.xid ?? mine.uploadedBy?.xid, userXid)
+      assert.ok((await bff.files.list(top, { actingAs: readerXid })).files.some((f) => f.xid === mine.xid))
+      await bff.files.delete(mine, { actingAs: userXid })
+      assert.equal(await bff.files.info(mine.xid), null)
+      await rejectsCode(admin.files.info(bin.xid, { actingAs: readerXid }), 'NOT_TRUSTED')
     })
   })
 

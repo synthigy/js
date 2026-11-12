@@ -378,7 +378,20 @@ export class WatchMultiplexer {
     })
   }
 
+  _settleSubscribed(watches = this._watches) {
+    for (const w of watches) w._markSubscribed?.()
+  }
+
   async _flush() {
+    const covered = [...this._watches]
+    try {
+      await this._postUnion()
+    } finally {
+      this._settleSubscribed(covered)
+    }
+  }
+
+  async _postUnion() {
     if (!this._watches.size) {
       // empty union: still POST so server drops what we held
       const items = []
@@ -515,6 +528,7 @@ export class WatchMultiplexer {
           reason: e?.message ?? 'sse failed',
           records: [],
         })
+        this._settleSubscribed()
         return
       } finally {
         if (!firstSession) this._fanOutSentinel({
@@ -640,6 +654,7 @@ export class Watch {
     this._mutedRequests = new Map()  // request-id → timeoutId
     this._opts = { backpressure, bufferSize }
     this._signal = signal
+    this._subscribed = new Promise((resolve) => { this._markSubscribed = resolve })
     if (signal) {
       if (signal.aborted) { this._closed = true; return }
       signal.addEventListener('abort', () => this.close(), { once: true })
@@ -649,6 +664,9 @@ export class Watch {
 
   get interest() { return this._interest }
   get closed() { return this._closed }
+
+  /** Resolves once the engine holds a subscription covering this watch (or it failed, as a sentinel says). */
+  subscribed() { return this._subscribed }
 
   add(xids) {
     if (this._closed) return
@@ -690,6 +708,7 @@ export class Watch {
   close() {
     if (this._closed) return
     this._closed = true
+    this._markSubscribed()
     for (const it of this._iterators) it.buf.close()
     this._iterators.clear()
     for (const t of this._mutedRequests.values()) clearTimeout(t)

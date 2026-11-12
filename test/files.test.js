@@ -344,3 +344,50 @@ describe('files links', () => {
     assert.deepEqual([...new Uint8Array(await out.arrayBuffer())], [1, 2])
   })
 })
+
+describe('files: actingAs', () => {
+  const any = () => respond(200, { ...info, files: [], folders: [], versions: [], links: [], url: 'u' })
+  const each = (c, o) => [
+    () => c.files.put('/a/b.txt', 'x', o),
+    () => c.files.download('/a/b.txt', { ...o, version: 1, as: 'text' }),
+    () => c.files.zip({ files: [X] }, o),
+    () => c.files.info(X, o),
+    () => c.files.list('/a/', o),
+    () => c.files.list(undefined, o),
+    () => c.files.search('q', o),
+    () => c.files.delete(X, o),
+    () => c.files.move(X, '/b/c.txt', o),
+    () => c.files.folder('/a/', {}, o),
+    () => c.files.share('/a/', 'read', { users: [F] }, o),
+    () => c.files.unshare('/a/', 'read', { users: [F] }, o),
+    () => c.files.access('/a/', o),
+    () => c.files.versions('/a/b.txt', o),
+    () => c.files.restore('/a/b.txt', 1, o),
+    () => c.files.link('/a/b.txt', o),
+    () => c.files.links('/a/b.txt', o),
+    () => c.files.unlink(F, o),
+    () => c.files.serve(X, { headers: {} }, o),
+  ]
+  const header = (h) => h?.['X-Acting-As'] ?? h?.['x-acting-as']
+
+  it('every files call, and the path lookup before it, sends X-Acting-As', async () => {
+    const c = client()
+    for (const call of each(c, { actingAs: F })) {
+      calls.length = 0
+      responses = Array.from({ length: 4 }, any)
+      await call()
+      assert.ok(calls.length > 0)
+      for (const { url, init } of calls) assert.equal(header(init.headers), F, `${init.method ?? 'GET'} ${url}`)
+    }
+  })
+
+  it('without actingAs no header goes out', async () => {
+    const c = client()
+    for (const call of each(c, {})) {
+      calls.length = 0
+      responses = Array.from({ length: 4 }, any)
+      await call()
+      for (const { init } of calls) assert.equal(header(init.headers), undefined)
+    }
+  })
+})

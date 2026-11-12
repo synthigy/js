@@ -294,3 +294,72 @@ describe('WatchMultiplexer — fusion (N watches → 1 SSE + 1 consolidated POST
     mux.close()
   })
 })
+
+describe('watchQuery.xsql — query options', () => {
+  test('searchOpts reach client.query top level with op + entity', async () => {
+    const { watchQuery } = await import('../src/watch-query.js')
+    let seen
+    const client = { query: async (_x, _p, opts) => { seen = opts; return [] } }
+    const w = watchQuery.xsql(client, '@search Center\nname', {}, {
+      entity: 'center', op: 'search', searchOpts: { actingAs: 'petar' },
+    })
+    await w._runQuery()
+    assert.deepEqual(seen, { actingAs: 'petar', op: 'search', entity: 'center' })
+  })
+})
+
+describe('QueryWatch refresh triggers', () => {
+  test('record/* events on the watched rows re-run the query', async () => {
+    const { watchQuery } = await import('../src/watch-query.js')
+    const queue = []
+    let wake
+    const events = {
+      async *[Symbol.asyncIterator]() {
+        for (;;) {
+          while (queue.length) yield queue.shift()
+          await new Promise((r) => { wake = r })
+        }
+      },
+    }
+    let runs = 0
+    const client = {
+      __watchMux: { resolver: null },
+      query: async () => { runs++; return [{ xid: 'A', name: `v${runs}` }] },
+      watch: () => ({ events, close() {}, subscribed: async () => {}, interest: {}, setInterest() {} }),
+    }
+    const w = watchQuery.xsql(client, '@search list\nproject\n  name', {}, { entity: 'project', op: 'search' })
+    await w.ready()
+    assert.equal(runs, 2, 'snapshot, then one refetch once the subscription holds')
+    for (const type of ['record/update', 'entity/touched', 'relation/link']) {
+      const before = runs
+      queue.push({ type, record: 'A' }); wake?.()
+      for (let t = Date.now(); runs === before && Date.now() - t < 2000;) await new Promise((r) => setTimeout(r, 20))
+      assert.equal(runs, before + 1, `${type} refreshes`)
+    }
+    w.close()
+  })
+})
+
+describe('QueryWatch subscription gap', () => {
+  test('a write between the snapshot and the subscription is in the list at ready()', async () => {
+    const { watchQuery } = await import('../src/watch-query.js')
+    let subscribe
+    const held = new Promise((r) => { subscribe = r })
+    let name = 'before'
+    const client = {
+      __watchMux: { resolver: null },
+      query: async () => [{ xid: 'A', name }],
+      watch: () => ({ events: { async *[Symbol.asyncIterator]() { await new Promise(() => {}) } }, close() {}, subscribed: () => held, interest: {}, setInterest() {} }),
+    }
+    const w = watchQuery.xsql(client, '@search list\nproject\n  name', {}, { entity: 'project', op: 'search' })
+    let ready = false
+    w.ready().then(() => { ready = true })
+    await new Promise((r) => setTimeout(r, 30))
+    assert.equal(ready, false, 'ready waits for the subscription')
+    name = 'after'
+    subscribe()
+    await w.ready()
+    assert.equal(w.records.get('A').name, 'after')
+    w.close()
+  })
+})

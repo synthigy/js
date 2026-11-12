@@ -200,6 +200,10 @@ export class QueryWatch {
 
     // 5. Drain underlying watch events → trigger refresh.
     this._drain()
+
+    // 6. Writes between the snapshot and the subscription sent no event: refetch once it holds.
+    await this._watch.subscribed?.()
+    if (!this._closed) await this._refresh()
   }
 
   async _runQuery() {
@@ -221,7 +225,7 @@ export class QueryWatch {
       for await (const ev of this._watch.events) {
         if (this._closed) break
         if (typeof ev.type === 'string'
-            && (ev.type.startsWith('entity/') || ev.type.startsWith('relation/'))) {
+            && (ev.type.startsWith('record/') || ev.type.startsWith('entity/') || ev.type.startsWith('relation/'))) {
           this._scheduleRefresh(ev)
         } else {
           // sentinels pass through to the QueryWatch consumer
@@ -360,7 +364,7 @@ watchQuery.xsql = function watchQueryXsql(client, xsql, params, opts) {
     throw new Error('watchQuery.xsql requires opts.entity (kebab-case root)')
   }
   return new QueryWatch(client, 'xsql',
-    { xsql, params, queryOpts: { ...opts, entity }, entity }, opts)
+    { xsql, params, queryOpts: { ...opts?.searchOpts, op: opts?.op, entity }, entity }, opts)
 }
 
 // ============================================================================
@@ -433,6 +437,8 @@ export class SqlTemplateWatch {
     }
     this._watch = this._client.watch(interest)
     this._drain()
+    await this._watch.subscribed?.()
+    if (!this._closed) await this._refresh()
   }
 
   async _drain() {

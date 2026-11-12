@@ -181,12 +181,13 @@ SYNTHIGY_ENDPOINT=http://localhost:7887 \
   SYNTHIGY_CLIENT_ID=… SYNTHIGY_CLIENT_SECRET=… \
   node --test 'test/integration.test.js'        # integration (skips without a server)
 SYNTHIGY_FILES_TEST_ENDPOINT=http://localhost:7887 \
-  SYNTHIGY_FILES_TEST_{ADMIN,USER,READER}_{ID,SECRET}=… \
+  SYNTHIGY_FILES_TEST_{ADMIN,USER,READER,BFF}_{ID,SECRET}=… \
   npm run test:files                            # live files (skips without the endpoint)
 ```
 
-The live files suite needs three client-credentials clients whose service users
-hold File Admin, File User and File Reader. `npm test` never runs it.
+The live files suite needs client-credentials clients whose service users
+hold File Admin, File User and File Reader, plus a trusted File Admin client (BFF)
+that acts as the others. `npm test` never runs it.
 
 ## License
 

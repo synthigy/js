@@ -447,23 +447,19 @@ describe('args passthrough', () => {
     await client.search('User', { _limit: 10, _offset: 0, _order_by: { name: 'asc' } }, ['name'])
   })
 
-  it('passes _where clause unchanged', async () => {
+  it('passes _or clause unchanged', async () => {
     const client = createClient({ endpoint: 'http://localhost', token: 't' })
 
     mockFetch.mock.mockImplementation(async (url, opts) => {
       const body = JSON.parse(opts.body)
       assert.deepEqual(body.operations[0].args, {
-        _where: {
-          _or: [{ role: { _eq: 'admin' } }, { role: { _eq: 'superuser' } }],
-        },
+        _or: [{ role: { _eq: 'admin' } }, { role: { _eq: 'superuser' } }],
       })
       return mockResponse(200, { results: [{ data: [], ok: true }] })
     })
 
     await client.search('User', {
-      _where: {
-        _or: [{ role: eq('admin') }, { role: eq('superuser') }],
-      },
+      _or: [{ role: eq('admin') }, { role: eq('superuser') }],
     }, ['name'])
   })
 
@@ -719,7 +715,7 @@ describe('selection normalization', () => {
     const client = createClient({ endpoint: 'http://localhost', token: 't' })
     const ratings = [
       { alias: 'votes', op: 'count' },
-      { alias: 'rating', op: { avg: 'value' }, args: { _where: { verified: { _eq: true } } } },
+      { alias: 'rating', op: { avg: 'value' }, args: { verified: { _eq: true } } },
       rel({ value: null }, { _limit: 3 }, 'recent'),
     ]
 
@@ -2565,31 +2561,30 @@ describe('keyFormat', () => {
   })
 })
 
-describe('defaultActingAs', () => {
+describe('actingAs is per call', () => {
   beforeEach(() => mockFetch.mock.resetCalls())
 
-  it('applies client-level actingAs to every request', async () => {
-    const client = createClient({ endpoint: 'http://localhost', token: 't', actingAs: 'u-default' })
+  it('a client-wide actingAs is refused', () => {
+    assert.throws(() => createClient({ endpoint: 'http://localhost', token: 't', actingAs: 'u-default' }),
+      (e) => e.code === 'CONFIG_ERROR')
+  })
 
+  it('without per-call actingAs the request runs as the client', async () => {
+    const client = createClient({ endpoint: 'http://localhost', token: 't' })
     mockFetch.mock.mockImplementation(async (url, opts) => {
-      const body = JSON.parse(opts.body)
-      assert.equal(body.acting_as, 'u-default')
+      assert.equal(JSON.parse(opts.body).acting_as, undefined)
       return mockResponse(200, { results: [{ data: [], ok: true }] })
     })
-
     await client.search('User', {}, ['name'])
   })
 
-  it('per-call actingAs overrides client default', async () => {
-    const client = createClient({ endpoint: 'http://localhost', token: 't', actingAs: 'u-default' })
-
+  it('per-call actingAs is sent', async () => {
+    const client = createClient({ endpoint: 'http://localhost', token: 't' })
     mockFetch.mock.mockImplementation(async (url, opts) => {
-      const body = JSON.parse(opts.body)
-      assert.equal(body.acting_as, 'u-override')
+      assert.equal(JSON.parse(opts.body).acting_as, 'u-call')
       return mockResponse(200, { results: [{ data: [], ok: true }] })
     })
-
-    await client.search('User', {}, ['name'], { actingAs: 'u-override' })
+    await client.search('User', {}, ['name'], { actingAs: 'u-call' })
   })
 })
 

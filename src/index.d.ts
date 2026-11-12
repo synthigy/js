@@ -51,7 +51,9 @@ export interface WhereClause {
 }
 
 export interface Args {
-  _where?: WhereClause
+  _and?: WhereClause[]
+  _or?: WhereClause[]
+  _not?: WhereClause
   _limit?: number
   _offset?: number
   _order_by?: Array<[string, 'asc' | 'desc']>
@@ -262,7 +264,13 @@ export interface FolderInfo {
   settings: { public: boolean | null; cache: number | null; can_link: boolean | null }
 }
 
-export interface FileLinkOpts {
+/** Per-call options every `files` method takes. */
+export interface FileActingOpts {
+  /** Run the call as this user (`X-Acting-As`); a trusted confidential client only. */
+  actingAs?: string
+}
+
+export interface FileLinkOpts extends FileActingOpts {
   /** Seconds the link lives: default 3600, at most 604800 (7 days). */
   expires?: number
   /** Downloads it allows; each GET is a whole download and ranges are ignored. Unset: unlimited. */
@@ -285,7 +293,7 @@ export interface FileLink {
   url?: string
 }
 
-export interface FilePutOpts {
+export interface FilePutOpts extends FileActingOpts {
   /** Defaults to the Blob's type, else text/plain for strings, else application/octet-stream. */
   contentType?: string
   /** Refuse with FILE_CHANGED unless the stored hash still matches (a hash, or the file). */
@@ -295,7 +303,7 @@ export interface FilePutOpts {
 
 export type FileDownloadAs = 'blob' | 'arrayBuffer' | 'text' | 'json' | 'stream' | 'response'
 
-export interface FileDownloadOpts<A extends FileDownloadAs = 'blob'> {
+export interface FileDownloadOpts<A extends FileDownloadAs = 'blob'> extends FileActingOpts {
   as?: A
   /** Inclusive byte range; `[start]` reads to the end, `[undefined, n]` the last n bytes. */
   range?: [number | undefined, number?] | { start?: number; end?: number }
@@ -314,7 +322,7 @@ export type FileDownloadResult<A extends FileDownloadAs> =
   : A extends 'response' ? Response
   : Blob
 
-export interface FileListOpts {
+export interface FileListOpts extends FileActingOpts {
   /** Names holding these words in order, any case; a space stands for anything between. */
   q?: string
   /** Files per page: default 100, at most 1000. */
@@ -327,7 +335,7 @@ export interface FileListing {
   folders: FolderInfo[]
 }
 
-export interface FileSearchOpts {
+export interface FileSearchOpts extends FileActingOpts {
   /** Search only below this folder. */
   folder?: FolderRef
   /** Results per page: default 100, at most 1000. */
@@ -374,41 +382,41 @@ export interface FilesApi {
   /** The bytes; null when `ifNoneMatch` still matches. */
   download<A extends FileDownloadAs = 'blob'>(file: FileRef, opts?: FileDownloadOpts<A>): Promise<FileDownloadResult<A> | null>
   /** One zip of the files and of everything inside the folders, read as you; what you can't read is listed in its `_skipped.txt`. */
-  zip<A extends Exclude<FileDownloadAs, 'json'> = 'blob'>(refs: { files?: FileRef[]; folders?: FolderRef[] }, opts?: { as?: A; signal?: AbortSignal }): Promise<FileDownloadResult<A>>
+  zip<A extends Exclude<FileDownloadAs, 'json'> = 'blob'>(refs: { files?: FileRef[]; folders?: FolderRef[] }, opts?: FileActingOpts & { as?: A; signal?: AbortSignal }): Promise<FileDownloadResult<A>>
   /** The file, or null when it is not there or you can't see it. */
-  info(file: FileRef): Promise<FileInfo | null>
+  info(file: FileRef, opts?: FileActingOpts): Promise<FileInfo | null>
   /** A folder's files and subfolders; `null`: files in no folder; nothing: every file you can see, newest first. */
   list(folder?: FolderRef | null, opts?: FileListOpts): Promise<FileListing>
   /** Folders and files whose paths hold the words of `q` in order ('site logo' finds /site/img/logo.png), shortest path first. */
   search(q: string, opts?: FileSearchOpts): Promise<FileSearch>
   /** Delete a file, or an empty folder (a path ending in / or the folder itself). */
-  delete(target: FileRef | FolderRef): Promise<void>
+  delete(target: FileRef | FolderRef, opts?: FileActingOpts): Promise<void>
   /** Where the file loads from, without a request; `inline` opens it in the browser instead of downloading. */
   url(file: FileRef, opts?: { inline?: boolean }): string
   /** Rename or move; for a file, a `to` ending in / keeps the name. */
-  move(from: FileRef | FolderRef, to: string): Promise<FileInfo | FolderInfo>
+  move(from: FileRef | FolderRef, to: string, opts?: FileActingOpts): Promise<FileInfo | FolderInfo>
   /** The folder at `path`, made with every missing folder above it; `settings` sets its public, cache and canLink. */
-  folder(path: string, settings?: FolderSettings): Promise<FolderInfo>
+  folder(path: string, settings?: FolderSettings, opts?: FileActingOpts): Promise<FolderInfo>
   /** Give users and groups an access on a folder; writers of the folder may. */
-  share(folder: FolderRef, access: FolderAccess, to: Grantees): Promise<void>
+  share(folder: FolderRef, access: FolderAccess, to: Grantees, opts?: FileActingOpts): Promise<void>
   /** Take an access away. */
-  unshare(folder: FolderRef, access: FolderAccess, from: Grantees): Promise<void>
+  unshare(folder: FolderRef, access: FolderAccess, from: Grantees, opts?: FileActingOpts): Promise<void>
   /** Who holds read, write and delete. */
-  access(folder: FolderRef): Promise<FolderAccessLists>
+  access(folder: FolderRef, opts?: FileActingOpts): Promise<FolderAccessLists>
   /** The kept versions (the last ten), newest first. */
-  versions(file: FileRef): Promise<FileVersion[]>
+  versions(file: FileRef, opts?: FileActingOpts): Promise<FileVersion[]>
   /** Make a kept version current again (VERSION_EXPIRED when it is gone). */
-  restore(file: FileRef, version: number | { id: number }): Promise<FileInfo>
+  restore(file: FileRef, version: number | { id: number }, opts?: FileActingOpts): Promise<FileInfo>
   /** A link that downloads the file without signing in, where its folder allows links. */
   link(file: FileRef, opts?: FileLinkOpts): Promise<FileLink & { url: string }>
   /** The file's live links you can see: your own, or all for File Admin. */
-  links(file: FileRef): Promise<FileLink[]>
+  links(file: FileRef, opts?: FileActingOpts): Promise<FileLink[]>
   /** End a link (the link or its xid) at once, on every engine. */
-  unlink(link: string | { xid: string }): Promise<void>
+  unlink(link: string | { xid: string }, opts?: FileActingOpts): Promise<void>
   /** Browser: a blob: URL of the bytes, downloaded with your token; call revoke when done. */
-  objectUrl(file: FileRef, opts?: { signal?: AbortSignal }): Promise<{ url: string; revoke(): void }>
+  objectUrl(file: FileRef, opts?: FileActingOpts & { signal?: AbortSignal }): Promise<{ url: string; revoke(): void }>
   /** Server: answer a browser's request with the file (Range, If-None-Match, ETag and type pass through). */
-  serve(file: FileRef, request?: Request | { method?: string; headers?: Record<string, string> }, opts?: { inline?: boolean }): Promise<Response>
+  serve(file: FileRef, request?: Request | { method?: string; headers?: Record<string, string> }, opts?: FileActingOpts & { inline?: boolean }): Promise<Response>
 }
 
 // ============================================================================
@@ -620,8 +628,6 @@ export interface ClientConfig {
    * audience at /.well-known/synthigy as `auth.oidc.audience`.
    */
   audience?: string
-  /** Default acting_as applied to every request unless overridden per-call */
-  actingAs?: string
   keyFormat?: KeyFormat
   /**
    * Hold the upstream SSE connection open across windows where no user
@@ -1316,6 +1322,9 @@ export interface Watch {
   add(xids: string[]): void
   remove(xids: string[]): void
   setInterest(interest: WatchInterest): void
+
+  /** Resolves once the engine holds a subscription covering this watch (or it failed; a sentinel says so). */
+  subscribed(): Promise<void>
 
   /** Suppress the next event carrying this request-id. Auto-expires after ttlMs. */
   muteRequest(requestId: string, opts?: { ttlMs?: number }): void
