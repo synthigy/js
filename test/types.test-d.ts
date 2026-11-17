@@ -87,11 +87,36 @@ function errorContract(e: unknown) {
     e.retryable satisfies boolean
     e.category satisfies 'auth' | 'iam' | 'validation' | 'not_found' | 'conflict' | 'rate_limit' | 'network' | 'internal'
     e.hint satisfies string | undefined
+    e.rule satisfies string | undefined
+    e.doc satisfies string | undefined
+    e.attribute satisfies string | undefined
     e.status satisfies number | undefined
     e.requestId satisfies string | undefined
   }
 }
 void errorContract
+
+// a failed exec result is typed with the wire error's fields, and builds a SynthigyError as is
+async function execErrorContract(c: SynthigyClient) {
+  const [r] = await c.exec([])
+  if (!r.ok) {
+    r.error.rule satisfies string | undefined
+    r.error.doc satisfies string | undefined
+    r.error.attribute satisfies string | undefined
+    new sdk.SynthigyError(r.error.message, r.error.code, r.error.details, r.error) satisfies sdk.SynthigyError
+  }
+}
+void execErrorContract
+
+// a rejected watch carries the error that refused it beside the reason
+function rejectedContract(ev: sdk.WatchSentinel) {
+  if (ev.type === 'subscription/rejected') {
+    ev.reason satisfies string
+    ev.error satisfies sdk.SynthigyError | Error | undefined
+    if (ev.error instanceof sdk.SynthigyError) ev.error.code satisfies string
+  }
+}
+void rejectedContract
 
 // sync/stack carry one record OR a list (bulk import), on the client, the
 // module-level mirrors and the batch op builders alike.

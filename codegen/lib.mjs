@@ -52,3 +52,13 @@ export async function warnStaleSchema(endpoint, schemaPath, write = (s) => conso
     write(`warning: ${schemaPath} is stale against ${endpoint} (${changed.length} datasets changed since the pull) — re-run with --pull`)
   }
 }
+
+// A failed describe as the codegen prints it: code and message, then the
+// position, hint and manual section the engine sent.
+export function describeFailure(endpoint, err) {
+  const lines = [`${err.code ? `${err.code}: ` : ''}${err.message ?? JSON.stringify(err)}`]
+  if (err.line) lines.push(`  at line ${err.line}${err.col ? `, col ${err.col}` : ''}`)
+  if (err.hint) lines.push(`  hint: ${err.hint}`)
+  if (err.doc) lines.push(`  docs: ${String(endpoint ?? '').replace(/\/+$/, '')}/docs/${err.doc}`)
+  return lines.join('\n')
+}

@@ -10,7 +10,7 @@ import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { TS, tsScalar, pascal, camel, warnStaleSchema } from './lib.mjs'
+import { TS, tsScalar, pascal, camel, warnStaleSchema, describeFailure } from './lib.mjs'
 import { PLATFORM_AUDIENCE } from '../src/index.js'
 
 let tsVersion = null
@@ -211,22 +211,27 @@ if (cached && cached.sourceHash === sourceHash) {
       headers: { 'content-type': 'application/json', ...(tok && { authorization: `Bearer ${tok}` }) },
       body: JSON.stringify({ operations: [{ op: 'describe', sources }] }),
     })
-    if (!resp.ok) throw new Error(`describe ${resp.status}: ${await resp.text()}`)
+    if (!resp.ok) {
+      const text = await resp.text()
+      let data
+      try { data = JSON.parse(text) } catch { /* not JSON */ }
+      if (data?.error) throw new Error(describeFailure(ENDPOINT, data.error))
+      throw new Error(`HTTP ${resp.status}: ${text}`)
+    }
     const body = await resp.json()
     const r0   = (body.results ?? body.result ?? [body.data ?? body])[0] ?? body
     // A describe that fails answers 200 with {ok:false, error} in the result.
     // Reading .operations off that yields "not iterable" and throws the
     // server's diagnostic away — which is the only thing that says WHICH
     // attribute the templates got wrong.
-    const err = r0?.error ?? (r0?.ok === false ? { message: 'describe failed' } : null)
-    if (err) throw new Error(err.message ?? JSON.stringify(err))
+    const err = r0?.error ?? (r0?.ok === false ? { message: 'no error detail' } : null)
+    if (err) throw new Error(describeFailure(ENDPOINT, err))
     ir = r0.result ?? r0.data ?? r0
     if (!Array.isArray(ir?.operations))
       throw new Error(`describe returned no operations: ${JSON.stringify(ir).slice(0, 200)}`)
   } catch (e) {
-    console.error(cached
-      ? `sources changed since IR pull and describe failed (${e.message}) — run under \`synthigy exec\` or revert the .xsql edit`
-      : `describe failed: ${e.message}`)
+    console.error(`describe failed: ${e.message}`)
+    if (cached) console.error('  sources changed since the IR pull: run under `synthigy exec` or revert the .xsql edit')
     process.exit(1)
   }
   ir = { sourceHash, ...ir }
@@ -465,7 +470,7 @@ ${res.join('\n')}
   batchChunks.push(lines.join('\n\n'))
 }
 if (batchChunks.length) batchChunks.unshift(`function _batchResult(r: OperationResult, verb: string): unknown {
-  if (!r?.ok) return new SynthigyError(r?.error?.message ?? 'operation failed', r?.error?.code ?? 'OPERATION_FAILED')
+  if (!r?.ok) return new SynthigyError(r?.error?.message ?? 'operation failed', r?.error?.code ?? 'OPERATION_FAILED', r?.error?.details, r?.error)
   return verb === 'get' ? (r.data ?? null) : (r.data ?? [])
 }`)
 

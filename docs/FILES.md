@@ -179,7 +179,7 @@ The TypeScript types describe the snake_case shape.
 - **Size**: no limit on the Enso and Jetty servers; on http-kit one request
   carries up to `SYNTHIGY_HTTPKIT_MAX_BODY` (25 MB by default), refused with a
   plain 413.
-- **Versions**: the last ten are kept; older ones are `VERSION_EXPIRED`.
+- **Versions**: the last 100 are kept; older ones are `VERSION_EXPIRED`.
   Deleted files keep their bytes for 30 days on the server.
 
 ## Errors

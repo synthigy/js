@@ -827,9 +827,13 @@ const RETRYABLE_CATEGORIES = new Set(['network', 'rate_limit', 'internal'])
  *   - .details  — opaque payload from the server (legacy field; new
  *                 code should prefer the structured fields below)
  *   - .hint     — "Did you mean X?" suggestion for typos
+ *   - .rule     — the rule that refused (e.g., 'relation_data')
+ *   - .doc      — that rule's manual section (e.g., 'errors/relation_data'),
+ *                 readable at GET /docs/errors/relation_data
  *   - .available— array of valid alternatives (e.g., relations on the entity)
  *   - .path     — JSON path into the request where validation failed
  *   - .entity   — entity name involved
+ *   - .attribute— attribute name involved
  *   - .relation — relation name involved
  *   - .operator — operator name involved
  *   - .requestId— request ID for cross-correlation with server logs
@@ -856,9 +860,12 @@ export class SynthigyError extends Error {
     if (details !== undefined) this.details = details
     if (extras) {
       if (extras.hint        !== undefined) this.hint        = extras.hint
+      if (extras.rule        !== undefined) this.rule        = extras.rule
+      if (extras.doc         !== undefined) this.doc         = extras.doc
       if (extras.available   !== undefined) this.available   = extras.available
       if (extras.path        !== undefined) this.path        = extras.path
       if (extras.entity      !== undefined) this.entity      = extras.entity
+      if (extras.attribute   !== undefined) this.attribute   = extras.attribute
       if (extras.relation    !== undefined) this.relation    = extras.relation
       if (extras.operator    !== undefined) this.operator    = extras.operator
       if (extras.requestId   !== undefined) this.requestId   = extras.requestId
@@ -898,9 +905,12 @@ function _generateRequestId() {
 function _errorFromServer(err, status, requestId) {
   return new SynthigyError(err.message, err.code, err.details, {
     hint:        err.hint,
+    rule:        err.rule,
+    doc:         err.doc,
     available:   err.available,
     path:        err.path,
     entity:      err.entity,
+    attribute:   err.attribute,
     relation:    err.relation,
     operator:    err.operator,
     line:        err.line,
@@ -915,17 +925,22 @@ function _errorFromServer(err, status, requestId) {
 }
 
 /**
- * Build a SynthigyError from a non-ok /oauth/onboard or /oauth/onboard/complete
- * response. Wire shape here is {error: "<snake_case_code>"} — a bare string,
- * unlike the {error: {code, message}} envelope /data uses — so it's handled
- * separately rather than through _errorFromServer (which would silently miss
- * the code on a string).
+ * _errorFromServer for an error that may be missing, or lack its message or code.
+ * @internal
+ */
+function _errorOr(err, status, message, code = 'HTTP_ERROR') {
+  return _errorFromServer({ ...err, message: err?.message || message, code: err?.code || code }, status)
+}
+
+/**
+ * The error of a non-ok /oauth/onboard[/complete] reply: a bare string code, unless the server sent its error object.
  * @internal
  */
 async function onboardError(resp) {
   const data = await resp.json().catch(() => ({}))
-  const code = (typeof data.error === 'string' ? data.error : null)
+  const code = (typeof data?.error === 'string' ? data.error : null)
   if (code) return new SynthigyError(`onboard failed: ${code}`, code.toUpperCase(), undefined, { status: resp.status })
+  if (data?.error && typeof data.error === 'object') return _errorOr(data.error, resp.status, `onboard request failed (${resp.status})`)
   return new SynthigyError(`onboard request failed (${resp.status})`, 'HTTP_ERROR', undefined, { status: resp.status })
 }
 
@@ -1550,10 +1565,7 @@ class SynthigyClient {
     })
     if (!resp.ok) {
       const data = await resp.json().catch(() => ({}))
-      throw new SynthigyError(
-        data.error?.message || 'Subscription set failed',
-        data.error?.code || 'HTTP_ERROR'
-      )
+      throw _errorOr(data.error, resp.status, 'Subscription set failed')
     }
     return resp.json()
   }
@@ -1723,10 +1735,7 @@ class SynthigyClient {
     const resp = await this._fetchAuth(`${this._endpoint}/data/subscription/status`)
     if (!resp.ok) {
       const data = await resp.json().catch(() => ({}))
-      throw new SynthigyError(
-        data.error?.message || 'Subscription status failed',
-        data.error?.code || 'HTTP_ERROR'
-      )
+      throw _errorOr(data.error, resp.status, 'Subscription status failed')
     }
     return resp.json()
   }
@@ -1844,7 +1853,7 @@ class SynthigyClient {
     const resp = await this._fetchAuth(url.toString())
     if (!resp.ok) {
       const data = await resp.json().catch(() => ({}))
-      throw new SynthigyError(data.error?.message || 'Schema request failed', data.error?.code || 'HTTP_ERROR')
+      throw _errorOr(data.error, resp.status, 'Schema request failed')
     }
     return resp.json()
   }
@@ -1884,10 +1893,7 @@ class SynthigyClient {
     })
     if (!resp.ok) {
       const data = await resp.json().catch(() => ({}))
-      throw new SynthigyError(
-        data.error?.message || `Lint request failed (${resp.status})`,
-        data.error?.code || 'HTTP_ERROR'
-      )
+      throw _errorOr(data.error, resp.status, `Lint request failed (${resp.status})`)
     }
     const json = await resp.json()
     return json.diagnostics ?? []
@@ -1927,17 +1933,11 @@ class SynthigyClient {
     })
     const json = await resp.json().catch(() => ({}))
     if (!resp.ok) {
-      throw new SynthigyError(
-        json.error?.message || `Compile request failed (${resp.status})`,
-        json.error?.code || 'HTTP_ERROR'
-      )
+      throw _errorOr(json.error, resp.status, `Compile request failed (${resp.status})`)
     }
     const [result] = json.results ?? []
     if (!result?.ok) {
-      throw new SynthigyError(
-        result?.error?.message || 'Compile failed',
-        result?.error?.code || 'XSQL_PARSE_ERROR'
-      )
+      throw _errorOr(result?.error, undefined, 'Compile failed', 'XSQL_PARSE_ERROR')
     }
     return result.operation
   }
@@ -2082,7 +2082,7 @@ class SynthigyClient {
   async destroy(datasetXid, opts) {
     const [result] = await this.exec([{ op: 'delete', entity: 'dataset', data: { xid: datasetXid } }], opts)
     if (!result.ok) throw _errorFromServer(result.error, undefined, result._requestId)
-    return result.data
+    return true
   }
 
   /**
@@ -2133,10 +2133,7 @@ class SynthigyClient {
     }
     if (!resp.ok) {
       const data = await resp.json().catch(() => ({}))
-      throw new SynthigyError(
-        data.error?.message || `History op '${op}' failed (${resp.status})`,
-        data.error?.code || 'HTTP_ERROR'
-      )
+      throw _errorOr(data.error, resp.status, `History op '${op}' failed (${resp.status})`)
     }
     const body = await resp.json()
     return body.result
@@ -2592,6 +2589,9 @@ class SynthigyClient {
     )
     if (!resp.ok) {
       const text = await resp.text().catch(() => '')
+      let data
+      try { data = JSON.parse(text) } catch { /* not JSON */ }
+      if (data?.error) throw _errorFromServer(data.error, resp.status)
       throw new SynthigyError(`SSE connect failed (${resp.status})`, 'HTTP_ERROR', text)
     }
     if (!resp.body) throw new SynthigyError('SSE response has no body', 'HTTP_ERROR')

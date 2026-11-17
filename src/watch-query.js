@@ -157,7 +157,7 @@ export class QueryWatch {
     this._readyPromise = this._bootstrap().catch((e) => {
       this._readyError = e
       this._buf.push({ type: 'subscription/rejected',
-        reason: e?.message ?? 'bootstrap failed', records: [] })
+        reason: e?.message ?? 'bootstrap failed', error: e, records: [] })
     })
     // Honor opts.signal so callers can cancel the watch via AbortController.
     if (opts.signal) {
@@ -234,7 +234,7 @@ export class QueryWatch {
       }
     } catch (e) {
       this._buf.push({ type: 'subscription/rejected',
-        reason: e?.message ?? 'underlying watch failed', records: [] })
+        reason: e?.message ?? 'underlying watch failed', error: e, records: [] })
     }
   }
 
@@ -244,7 +244,7 @@ export class QueryWatch {
       this._coalesceTimer = null
       this._refresh(triggeringEvent).catch((e) => {
         this._buf.push({ type: 'subscription/rejected',
-          reason: e?.message ?? 'refresh failed', records: [] })
+          reason: e?.message ?? 'refresh failed', error: e, records: [] })
       })
     }, REFRESH_COALESCE_MS)
   }
@@ -409,7 +409,7 @@ export class SqlTemplateWatch {
     this._readyPromise = this._bootstrap().catch((e) => {
       this._readyError = e
       this._buf.push({ type: 'subscription/rejected',
-        reason: e?.message ?? 'bootstrap failed', records: [] })
+        reason: e?.message ?? 'bootstrap failed', error: e, records: [] })
     })
     if (opts.signal) {
       if (opts.signal.aborted) { this.close(); return }
@@ -462,7 +462,7 @@ export class SqlTemplateWatch {
       }
     } catch (e) {
       this._buf.push({ type: 'subscription/rejected',
-        reason: e?.message ?? 'underlying watch failed', records: [] })
+        reason: e?.message ?? 'underlying watch failed', error: e, records: [] })
     }
   }
 
@@ -472,7 +472,7 @@ export class SqlTemplateWatch {
       this._coalesceTimer = null
       this._refresh(triggeringEvent).catch((e) => {
         this._buf.push({ type: 'subscription/rejected',
-          reason: e?.message ?? 'refresh failed', records: [] })
+          reason: e?.message ?? 'refresh failed', error: e, records: [] })
       })
     }, REFRESH_COALESCE_MS)
   }

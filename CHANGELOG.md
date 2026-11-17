@@ -3,6 +3,35 @@
 All notable changes to `@synthigy/sdk`. Follows [semver](https://semver.org).
 Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.4.0
+
+### Added
+- **Errors keep `doc`, `rule` and `attribute`** when the engine sends them, like
+  `hint`: `rule` is the rule that refused and `doc` its manual section (e.g.
+  `errors/relation_data`, readable at `GET /docs/errors/relation_data`). Typed on
+  `SynthigyError` and on a failed `exec()` result (`OperationError`).
+- **`error` on `subscription/rejected`**: the error that refused the subscribe
+  or refresh, beside the unchanged `reason`, on `watch`, `watchQuery` and
+  `watchSqlTemplate` events: a `SynthigyError` (`code`, `hint`, `rule`, `doc`,
+  …) when the engine refused, a plain `Error` when the network failed.
+
+### Fixed
+- `destroy()` returns `true` once the engine accepts it, also when the engine
+  answers `null` (it returned `null`).
+- `onboard()` / `onboardComplete()` answered an engine error object (a router
+  404, a 500, a 503 `MODULE_NOT_LOADED`) with `HTTP_ERROR`; they throw the
+  engine's error, its code and fields included. Bare-string codes are unchanged.
+- `schema()`, `lint()`, `compile()`, `history`, subscription set/status and
+  generated `@batch` members kept only `message` and `code` of a server error;
+  they now keep the same fields as the `/data` calls (`hint`, `path`,
+  `diagnostics`, `retryable`, …).
+- An engine `FORBIDDEN` (403) on the SSE connect now ends `listen()` /
+  `observe()` (they throw it, as for `UNAUTHORIZED`) and `watch` (a
+  `subscription/rejected` event) instead of retrying forever; other refusals
+  keep retrying.
+- Code generator describe failures show the engine's position, hint and manual section
+  (`docs: <endpoint>/docs/<doc>`), not only the message.
+
 ## 0.3.0
 
 Needs engine v0.5.0 or later.

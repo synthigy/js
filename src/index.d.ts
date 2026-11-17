@@ -91,9 +91,31 @@ export interface DeployAck {
   dataset: string
 }
 
+/** A failed operation's error; the optional fields are present only when the server sent them. */
+export interface OperationError {
+  message: string
+  code: string
+  details?: unknown
+  hint?: string
+  rule?: string
+  doc?: string
+  available?: string[]
+  path?: unknown
+  entity?: string
+  attribute?: string
+  relation?: string
+  operator?: string
+  line?: number
+  col?: number
+  start?: SourcePosition
+  end?: SourcePosition
+  diagnostics?: unknown[]
+  retryable?: boolean
+}
+
 export type OperationResult<T = unknown> =
   | { ok: true; data: T }
-  | { ok: false; error: { message: string; code: string } }
+  | { ok: false; error: OperationError }
 
 export type Operation = Record<string, unknown>
 
@@ -577,9 +599,14 @@ export class SynthigyError extends Error {
   retryable: boolean
   details?: unknown
   hint?: string
+  /** The rule that refused, e.g. `relation_data`. */
+  rule?: string
+  /** That rule's manual section, e.g. `errors/relation_data`, readable at `GET /docs/errors/relation_data`. */
+  doc?: string
   available?: string[]
   path?: unknown
   entity?: string
+  attribute?: string
   relation?: string
   operator?: string
   requestId?: string
@@ -590,7 +617,8 @@ export class SynthigyError extends Error {
   end?: SourcePosition
   diagnostics?: unknown[]
   constructor(message: string, code: string, details?: unknown, extras?: {
-    hint?: string; available?: string[]; path?: unknown; entity?: string; relation?: string
+    hint?: string; rule?: string; doc?: string; available?: string[]; path?: unknown
+    entity?: string; attribute?: string; relation?: string
     operator?: string; requestId?: string; status?: number; retryable?: boolean
     line?: number; col?: number; start?: SourcePosition; end?: SourcePosition; diagnostics?: unknown[]
   })
@@ -1309,7 +1337,7 @@ export interface RelationEvent extends WatchProvenance {
 export type WatchSentinel =
   | { type: 'connection/resumed'; gap: [string | null, string | null] }
   | { type: 'schema/changed' }
-  | { type: 'subscription/rejected'; reason: string; records: string[] }
+  | { type: 'subscription/rejected'; reason: string; error?: SynthigyError | Error; records: string[] }
   | { type: 'paused' }
 
 export type WatchEvent = RecordEvent | RelationEvent | WatchSentinel

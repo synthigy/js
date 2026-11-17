@@ -398,6 +398,62 @@ describe('error handling', () => {
     assert.deepEqual(err.details, { extra: 1 })
     assert.ok(err instanceof Error)
   })
+
+  const stamp = { message: "'modified_by' is set by the system on Movie", code: 'ATTRIBUTE_FORBIDDEN',
+                  hint: 'leave it out of data', rule: 'stamp', doc: 'errors/stamp',
+                  entity: 'Movie', attribute: 'modified_by' }
+  const keepsStamp = (where) => (e) => {
+    assert.ok(e instanceof SynthigyError, where)
+    assert.deepEqual([e.code, e.hint, e.rule, e.doc, e.entity, e.attribute],
+      ['ATTRIBUTE_FORBIDDEN', 'leave it out of data', 'stamp', 'errors/stamp', 'Movie', 'modified_by'], where)
+    return true
+  }
+
+  it('keeps doc, rule and attribute on a per-op and a top-level error', async () => {
+    const client = createClient({ endpoint: 'http://localhost', token: 't' })
+    for (const [where, status, body] of [
+      ['per-op', 200, { results: [{ ok: false, error: stamp }] }],
+      ['top-level', 200, { ok: false, error: stamp }],
+      ['top-level 400', 400, { ok: false, error: stamp }],
+      ['top-level 403', 403, { ok: false, error: stamp }],
+    ]) {
+      mockFetch.mock.mockImplementation(async () => mockResponse(status, body))
+      await assert.rejects(client.sync('movie', { modified_by: 'x' }), keepsStamp(where))
+    }
+  })
+
+  it('leaves doc, rule and attribute unset when the server sends none, like hint', async () => {
+    const client = createClient({ endpoint: 'http://localhost', token: 't' })
+    mockFetch.mock.mockImplementation(async () =>
+      mockResponse(200, { results: [{ ok: false, error: { message: 'Not found', code: 'NOT_FOUND' } }] }))
+    await assert.rejects(client.get('movie', { xid: 'x' }, { title: null }), (e) => {
+      for (const k of ['hint', 'rule', 'doc', 'attribute']) assert.equal(Object.hasOwn(e, k), false, k)
+      return true
+    })
+  })
+
+  it('keeps doc, rule and attribute on every endpoint that answers an error', async () => {
+    const client = createClient({ endpoint: 'http://localhost', token: 't' })
+    const forbidden = { ...stamp, code: 'FORBIDDEN' }
+    for (const [where, status, body, call] of [
+      ['schema', 400, { error: stamp }, () => client.schema()],
+      ['lint', 400, { error: stamp }, () => client.lint('movie\n  title\n')],
+      ['compile', 400, { error: stamp }, () => client.compile('movie\n  title\n')],
+      ['compile per-op', 200, { results: [{ ok: false, error: stamp }] }, () => client.compile('movie\n  title\n')],
+      ['history', 400, { error: stamp }, () => client.history.events()],
+      ['subscription set', 400, { error: stamp }, () => client.clearSubscriptions()],
+      ['subscription status', 400, { error: stamp }, () => client.subscriptions()],
+      ['files', 400, { error: stamp }, () => client.files.info('/site/logo.png')],
+      ['deploy', 200, { results: [{ ok: false, error: stamp }] }, () => client.deploy('{}')],
+    ]) {
+      mockFetch.mock.mockImplementation(async () => mockResponse(status, body))
+      await assert.rejects(call(), keepsStamp(where))
+    }
+    mockFetch.mock.mockImplementation(async () => mockResponse(403, { error: forbidden }))
+    await assert.rejects(client.listen({ signal: AbortSignal.timeout(3000) }).next(), (e) =>
+      e.code === 'FORBIDDEN' && e.status === 403 && e.rule === 'stamp' && e.doc === 'errors/stamp' &&
+      e.attribute === 'modified_by')
+  })
 })
 
 describe('operators', () => {
@@ -1847,6 +1903,17 @@ describe('onboard', () => {
     )
   })
 
+  it('keeps the server error object a router, a 500 or a 503 sends', async () => {
+    const client = createClient({ endpoint: 'http://localhost', token: 't' })
+    mockFetch.mock.mockImplementation(async () => mockResponse(503, { error: {
+      message: 'oauth is not loaded', code: 'MODULE_NOT_LOADED', hint: 'h', rule: 'stamp', doc: 'errors/stamp' } }))
+    for (const call of [() => client.onboard('user-xid-1'), () => client.onboardComplete('t')]) {
+      await assert.rejects(call, (err) => err instanceof SynthigyError &&
+        err.message === 'oauth is not loaded' && err.code === 'MODULE_NOT_LOADED' && err.hint === 'h' &&
+        err.rule === 'stamp' && err.doc === 'errors/stamp' && err.status === 503)
+    }
+  })
+
   it('does not crash on a non-JSON error body', async () => {
     const client = createClient({ endpoint: 'http://localhost', token: 't' })
     mockFetch.mock.mockImplementation(async () => ({
@@ -2937,6 +3004,16 @@ describe('deploy / destroy', () => {
     assert.equal(await client().destroy('ds-1'), true)
     const body = JSON.parse(mockFetch.mock.calls[0].arguments[1].body)
     assert.deepEqual(body.operations, [{ op: 'delete', entity: 'dataset', data: { xid: 'ds-1' } }])
+  })
+
+  it('destroy answers true whatever data the engine sends, and rejects a refusal', async () => {
+    for (const data of [true, null, undefined]) {
+      mockFetch.mock.mockImplementation(async () => mockResponse(200, { results: [{ ok: true, data }] }))
+      assert.equal(await client().destroy('ds-1'), true, `data ${data}`)
+    }
+    mockFetch.mock.mockImplementation(async () =>
+      mockResponse(200, { results: [{ ok: false, error: { message: 'no', code: 'FORBIDDEN' } }] }))
+    await assert.rejects(client().destroy('ds-1'), (e) => e.code === 'FORBIDDEN')
   })
 
   it('op builders match the client methods', () => {

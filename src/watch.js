@@ -370,6 +370,7 @@ export class WatchMultiplexer {
         for (const w of this._watches) w._pushSentinel({
           type: 'subscription/rejected',
           reason: e?.message ?? 'set-subscriptions failed',
+          error: e,
           records: [],
         })
       }).finally(() => {
@@ -500,6 +501,7 @@ export class WatchMultiplexer {
               for (const w of this._watches) w._pushSentinel({
                 type: 'subscription/rejected',
                 reason: e?.message ?? 'set-subscriptions failed',
+                error: e,
                 records: [],
               })
             })
@@ -526,6 +528,7 @@ export class WatchMultiplexer {
         for (const w of this._watches) w._pushSentinel({
           type: 'subscription/rejected',
           reason: e?.message ?? 'sse failed',
+          error: e,
           records: [],
         })
         this._settleSubscribed()

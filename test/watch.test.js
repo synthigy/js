@@ -1,6 +1,7 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 import { WatchMultiplexer, Watch, WatchError, CoalesceBuffer } from '../src/watch.js'
+import { SynthigyError } from '../src/index.js'
 
 const rec = (record, after, changed) => ({ type: 'record/update', record, after, changed })
 
@@ -360,6 +361,63 @@ describe('QueryWatch subscription gap', () => {
     subscribe()
     await w.ready()
     assert.equal(w.records.get('A').name, 'after')
+    w.close()
+  })
+})
+
+describe('subscription/rejected carries the error', () => {
+  const refusal = () => new SynthigyError('no', 'FORBIDDEN', undefined,
+    { hint: 'h', rule: 'stamp', doc: 'errors/stamp' })
+
+  async function nextRejected(it) {
+    const deadline = Date.now() + 2000
+    for (;;) {
+      const left = deadline - Date.now()
+      const r = left > 0 && await Promise.race([it.next(), new Promise((res) => setTimeout(() => res(null), left))])
+      if (!r || r.done) throw new Error('no subscription/rejected event')
+      if (r.value?.type === 'subscription/rejected') return r.value
+    }
+  }
+
+  function assertCarries(ev) {
+    assert.ok(ev.error instanceof SynthigyError)
+    assert.equal(ev.reason, ev.error.message)
+    assert.deepEqual([ev.error.code, ev.error.hint, ev.error.rule, ev.error.doc],
+      ['FORBIDDEN', 'h', 'stamp', 'errors/stamp'])
+  }
+
+  test('a refused subscribe', async () => {
+    const client = fakeClient()
+    client.setSubscriptions = async () => { throw refusal() }
+    const mux = new WatchMultiplexer(client, { schema: false })
+    const w = new Watch(mux, { records: ['u-1'] })
+    assertCarries(await nextRejected(w.events[Symbol.asyncIterator]()))
+    w.close(); mux.close()
+  })
+
+  test('a refused refresh', async () => {
+    const { watchQuery } = await import('../src/watch-query.js')
+    const queue = []
+    let wake
+    const events = {
+      async *[Symbol.asyncIterator]() {
+        for (;;) {
+          while (queue.length) yield queue.shift()
+          await new Promise((r) => { wake = r })
+        }
+      },
+    }
+    let refuse = false
+    const client = {
+      __watchMux: { resolver: null },
+      query: async () => { if (refuse) throw refusal(); return [{ xid: 'A', name: 'v' }] },
+      watch: () => ({ events, close() {}, subscribed: async () => {}, interest: {}, setInterest() {} }),
+    }
+    const w = watchQuery.xsql(client, '@search list\nproject\n  name', {}, { entity: 'project', op: 'search' })
+    await w.ready()
+    refuse = true
+    queue.push({ type: 'record/update', record: 'A' }); wake?.()
+    assertCarries(await nextRejected(w.events[Symbol.asyncIterator]()))
     w.close()
   })
 })
