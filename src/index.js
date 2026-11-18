@@ -10,7 +10,7 @@
  *
  * Intentionally out of scope — leave to the user's chosen libraries:
  *   - ID-token JWT verification (pick `jose`, `jsonwebtoken`, etc.)
- *   - HTTP pooling / retry / backoff (wrap `fetch` as you see fit)
+ *   - HTTP pooling, and retrying anything but SERVER_BUSY (wrap `fetch` as you see fit)
  *
  * @example
  * ```js
@@ -318,7 +318,7 @@ export function composeForest(records, { on, childrenKey = '_children' } = {}) {
 // ============================================================================
 
 /**
- * Normalize a subscribe()/observe() descriptor argument.
+ * Normalize a subscription descriptor argument.
  *
  *   ['xid-a', 'xid-b']                                    → {records: Set(2)}
  *   { records: ['xid-a'], operations: ['update'] }        → {records: Set(1), operations: Set(1)}
@@ -794,8 +794,58 @@ const ERROR_CATEGORIES = {
   VERSION_EXPIRED:            'not_found',
   CHECK_VIOLATION:            'conflict',
   NOT_NULL_VIOLATION:         'conflict',
+  // validation (engine codes)
+  BAD_ARGS_SHAPE:             'validation',
+  BAD_DATA_SHAPE:             'validation',
+  BAD_OP:                     'validation',
+  BAD_ORDER_BY_SHAPE:         'validation',
+  BAD_REQUEST:                'validation',
+  BETWEEN_UPPER_REQUIRED:     'validation',
+  CLIENT_REQUIRED:            'validation',
+  CURSOR_REQUIRED:            'validation',
+  DELETE_BATCH_LIMIT:         'validation',
+  DIFF_TIMESTAMPS_REQUIRED:   'validation',
+  ERASE_UNSUPPORTED:          'validation',
+  INVALID_FILTER:             'validation',
+  INVALID_LOG_CONFIG:         'validation',
+  INVALID_LOG_CONFIG_ACTION:  'validation',
+  INVALID_LOG_FILTER:         'validation',
+  INVALID_OPERATION:          'validation',
+  INVALID_ORDER:              'validation',
+  INVALID_SELECTION:          'validation',
+  INVALID_SELECTIONS:         'validation',
+  INVALID_TEMPLATE_IDENTIFIER: 'validation',
+  INVALID_TIMESTAMP:          'validation',
+  INVALID_VALUE:              'validation',
+  MISSING_ENTITY:             'validation',
+  MISSING_REFS:               'validation',
+  NON_UNIQUE_MATCH:           'validation',
+  OP_REQUIRED:                'validation',
+  PARAM_OPTIONAL_IN_OR:       'validation',
+  RECORD_XID_REQUIRED:        'validation',
+  SCHEMA_MISSING_CARDINALITY: 'validation',
+  TYPE_MISMATCH:              'validation',
+  UNIQUE_KEY_REQUIRED:        'validation',
+  // not_found (engine codes)
+  DOC_NOT_FOUND:              'not_found',
+  REF_NOT_FOUND:              'not_found',
+  SCHEMA_UNKNOWN_ATTRIBUTE:   'not_found',
+  SCHEMA_UNKNOWN_ENTITY:      'not_found',
+  SCHEMA_UNKNOWN_RELATION:    'not_found',
+  UNKNOWN_ATTRIBUTE:          'not_found',
+  UNKNOWN_ROLE:               'not_found',
+  // conflict (engine codes)
+  CONSTRAINT_VIOLATION:       'conflict',
+  DEPENDENT_OBJECTS:          'conflict',
+  GUARD_VIOLATION:            'conflict',
+  HOOK_REFUSED:               'conflict',
+  LOCKED:                     'conflict',
+  SCHEMA_CONFLICT:            'conflict',
+  // internal (engine codes)
+  DB_UNAVAILABLE:             'internal',
   // rate / capacity
   TIMEOUT:                    'rate_limit',
+  SERVER_BUSY:                'rate_limit',
   // network
   NETWORK_ERROR:              'network',
   // internal — fallback
@@ -812,6 +862,12 @@ const ERROR_CATEGORIES = {
  * from ERROR_CATEGORIES is retryable only when the server marks it so.
  */
 const RETRYABLE_CATEGORIES = new Set(['network', 'rate_limit', 'internal'])
+
+/** Times a request the engine turned away as SERVER_BUSY is sent in total; it never ran, so resending is safe. */
+const BUSY_ATTEMPTS = 3
+
+/** Cap on a Retry-After before jitter, so a proxy's long value can't park a call. */
+const BUSY_MAX_SECONDS = 10
 
 /**
  * SDK error class — every error the SDK throws is an instance.
@@ -890,6 +946,11 @@ export class SynthigyError extends Error {
  * lifetime, short enough to read in logs.
  * @internal
  */
+/** A fresh id for one event stream: the engine keeps that stream's subscription set apart from the client's other streams. */
+function _generateStreamId() {
+  return globalThis.crypto.randomUUID().replaceAll('-', '')
+}
+
 function _generateRequestId() {
   const buf = new Uint8Array(12)
   ;(globalThis.crypto?.getRandomValues
@@ -1122,10 +1183,34 @@ class SynthigyClient {
    * results (`{ok: false, error}`).
    */
   async _post(body) {
+    const payload = JSON.stringify(body)
+    const deadline = this._timeout ? Date.now() + this._timeout : Infinity
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this._postOnce(payload, attempt > 1 && deadline !== Infinity
+          ? AbortSignal.timeout(Math.max(deadline - Date.now(), 1)) : undefined)
+      } catch (e) {
+        if (attempt >= BUSY_ATTEMPTS || e?.code !== 'SERVER_BUSY') throw e
+        const wait = this._busyDelay(e._retryAfter)
+        if (Date.now() + wait >= deadline) throw e
+        await new Promise((resolve) => setTimeout(resolve, wait))
+      }
+    }
+  }
+
+  /** Wait before resending a SERVER_BUSY request: Retry-After seconds (1 when absent) with ±50% jitter. */
+  _busyDelay(retryAfter) {
+    const s = Number.parseInt(retryAfter, 10)
+    const base = Math.min(s > 0 ? s : 1, BUSY_MAX_SECONDS) * 1000
+    return base / 2 + Math.random() * base
+  }
+
+  async _postOnce(payload, signal) {
     const resp = await this._fetchAuth(this._dataUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: payload,
+      ...(signal && { signal }),
     })
     const requestId = resp.headers?.get?.('x-request-id') ?? undefined
     if (resp.status === 403) {
@@ -1139,7 +1224,11 @@ class SynthigyClient {
       let data
       try { data = JSON.parse(text) } catch { /* not JSON */ }
       if (data?.error) {
-        throw _errorFromServer(data.error, resp.status, requestId)
+        const e = _errorFromServer(data.error, resp.status, requestId)
+        if (e.code === 'SERVER_BUSY') {
+          Object.defineProperty(e, '_retryAfter', { value: resp.headers?.get?.('retry-after') ?? undefined })
+        }
+        throw e
       }
       throw new SynthigyError(`Request failed (${resp.status})`, 'HTTP_ERROR', text,
         { requestId, status: resp.status })
@@ -1515,10 +1604,8 @@ class SynthigyClient {
   // is in the set (server rotates the wire so `data[0]` is always the
   // subscribed perspective). No entity field. No firehose.
   //
-  // SDK pattern: caller passes a descriptor (`{records, operations?}` or
-  // a bare array of xids); SDK keys it by an explicit `key` option or a
-  // stable hash of the descriptor. Local mirror persists across calls so
-  // multiple parallel `observe()` flows can coexist on one client.
+  // Internal: the watch multiplexer is the only caller; it posts the union
+  // of every watch, so nothing else writes this client's subscription set.
   // --------------------------------------------------------------------------
 
   /**
@@ -1546,8 +1633,9 @@ class SynthigyClient {
    * POST the current local subscription state to the server.
    * @private
    */
-  async _flushSubscriptions() {
+  async _flushSubscriptions(opts) {
     const body = this._buildSubscriptionsBody()
+    if (opts?.stream) body.stream = opts.stream
     if (typeof process !== 'undefined' && process.env?.SDK_DEBUG) {
       const summary = (body.subscriptions ?? []).map((s) => ({
         type: s.type,
@@ -1593,7 +1681,7 @@ class SynthigyClient {
    * @param {string} [opts.key] - Stable handle for unsubscribe
    * @returns {Promise<{ok:boolean}>}
    */
-  async subscribe(descriptor, opts) {
+  async _subscribe(descriptor, opts) {
     const normalized = _normalizeDescriptor(descriptor)
     const key = opts?.key ?? _descriptorKey(normalized)
     this._dataSubs.set(key, normalized)
@@ -1608,7 +1696,7 @@ class SynthigyClient {
    * @param {string|string[]|{records: string[], operations?: string[]}} handle
    * @returns {Promise<{ok:boolean}>}
    */
-  async unsubscribe(handle) {
+  async _unsubscribe(handle) {
     let key
     if (typeof handle === 'string' && !Array.isArray(handle)) {
       // String handle — treat as the key first; if no match, the caller
@@ -1638,7 +1726,7 @@ class SynthigyClient {
    *        instead of runtime-model.
    * @returns {Promise<{ok:boolean}>}
    */
-  async subscribeModel(opts) {
+  async _subscribeModel(opts) {
     const t = opts?.raw ? 'deployed-model' : 'runtime-model'
     this._modelSubs.add(t)
     return this._flushSubscriptions()
@@ -1652,7 +1740,7 @@ class SynthigyClient {
    *        instead of runtime-model.
    * @returns {Promise<{ok:boolean}>}
    */
-  async unsubscribeModel(opts) {
+  async _unsubscribeModel(opts) {
     const t = opts?.raw ? 'deployed-model' : 'runtime-model'
     if (!this._modelSubs.delete(t)) return { ok: true }
     return this._flushSubscriptions()
@@ -1680,7 +1768,7 @@ class SynthigyClient {
    * ])
    * ```
    */
-  async setSubscriptions(items) {
+  async _setSubscriptions(items, opts) {
     this._dataSubs.clear()
     this._modelSubs.clear()
     this._entitySubs.clear()
@@ -1710,7 +1798,7 @@ class SynthigyClient {
         throw new SynthigyError(`Unsupported subscription type: ${t}`, 'UNSUPPORTED_TYPE')
       }
     }
-    return this._flushSubscriptions()
+    return this._flushSubscriptions(opts)
   }
 
   /**
@@ -1718,7 +1806,7 @@ class SynthigyClient {
    *
    * @returns {Promise<{ok:boolean}>}
    */
-  async clearSubscriptions() {
+  async _clearSubscriptions() {
     this._dataSubs.clear()
     this._modelSubs.clear()
     this._entitySubs.clear()
@@ -1732,7 +1820,8 @@ class SynthigyClient {
    * @returns {Promise<{ subscriptions: Array<Object> }>}
    */
   async subscriptions() {
-    const resp = await this._fetchAuth(`${this._endpoint}/data/subscription/status`)
+    const stream = this.__watchMux?._streamId
+    const resp = await this._fetchAuth(`${this._endpoint}/data/subscription/status${stream ? `?stream=${encodeURIComponent(stream)}` : ''}`)
     if (!resp.ok) {
       const data = await resp.json().catch(() => ({}))
       throw _errorOr(data.error, resp.status, 'Subscription status failed')
@@ -2543,38 +2632,13 @@ class SynthigyClient {
   // --------------------------------------------------------------------------
 
   /**
-   * Open an SSE connection to `/data/events` and yield change notifications.
-   *
-   * Events are notification-only (no data payload). Fetch the updated records
-   * via `exec`/`search`/`get` after receiving a notification.
-   *
-   * Yields objects: `{ type: 'change'|'delete', entity, relations?, xids? }`
-   *
-   * The async generator runs until the connection drops or the caller breaks.
-   * Subscriptions persist across reconnects — call `subscribe()` once at
-   * startup; the server remembers which entities this client watches.
-   *
-   * @param {Object} [opts]
-   * @param {AbortSignal} [opts.signal] - Cancel the listener
-   * @yields {{ type: string, entity: string, relations?: string[], xids?: string[] }}
-   *
-   * @example
-   * ```js
-   * await client.subscribe('User')
-   * for await (const event of client.listen()) {
-   *   const users = await client.search('User', {}, { name: null })
-   *   render(users)
-   * }
-   * ```
-   */
-  /**
    * One SSE session against `/data/events`. Yields parsed event frames
    * as `{ _sseEvent, _sseId, ...payload }` — the payload is the SSE
    * `data:` line parsed as JSON, plus metadata fields with `_sse`
    * prefix so they can't collide with payload keys. Caller handles
    * reconnect (listen() runs an infinite reconnect loop around this;
-   * observe() also re-subscribes between sessions because the server
-   * tears down subscription state on SSE close).
+   * the watch multiplexer re-sends its subscription set on each new
+   * stream id).
    * @private
    */
   async *_sseSession(opts) {
@@ -2582,8 +2646,9 @@ class SynthigyClient {
     const headers = { Accept: 'text/event-stream' }
     if (opts?.lastEventId) headers['Last-Event-ID'] = opts.lastEventId
 
+    const stream = opts?.stream
     const resp = await this._fetchAuth(
-      `${this._endpoint}/data/events`,
+      `${this._endpoint}/data/events${stream ? `?stream=${encodeURIComponent(stream)}` : ''}`,
       { headers, signal },
       { applyTimeout: false }
     )
@@ -2600,7 +2665,7 @@ class SynthigyClient {
     // Emit a synthetic 'open' sentinel so callers can POST /subscription/set
     // here (and only here) — POSTing before this point races the
     // server's stream creation and silently drops subscriptions.
-    yield { _sseEvent: 'open' }
+    yield { _sseEvent: 'open', stream }
 
     const reader = resp.body.getReader()
     const decoder = new TextDecoder()
@@ -2649,14 +2714,45 @@ class SynthigyClient {
     }
   }
 
+  /**
+   * Open an SSE connection to `/data/events` and yield change notifications.
+   *
+   * Events are notification-only (no data payload). Fetch the updated records
+   * via `exec`/`search`/`get` after receiving a notification.
+   *
+   * Yields objects: `{ type: 'change'|'delete', entity, relations?, xids? }`,
+   * plus `{ type: 'sse/open', stream }` when a connection opens and
+   * `{ type: 'sse/close', stream }` when it ends (before any reconnect).
+   *
+   * The async generator runs until the connection drops or the caller breaks.
+   * It yields only what the client's subscription set selects; declare that
+   * interest with `watch()`, which also re-sends the set after a reconnect.
+   * Most callers want `client.watch(...).events` instead of this raw stream.
+   *
+   * @param {Object} [opts]
+   * @param {AbortSignal} [opts.signal] - Cancel the listener
+   * @yields {{ type: string, entity: string, relations?: string[], xids?: string[] }}
+   *
+   * @example
+   * ```js
+   * const w = client.watch({ entities: ['User'] })
+   * for await (const event of w.events) {
+   *   const users = await client.search('User', {}, { name: null })
+   *   render(users)
+   * }
+   * ```
+   */
   async *listen(opts) {
     const signal = opts?.signal
     let delay = 1000
     let lastEventId = null
 
     while (!signal?.aborted) {
+      const stream = _generateStreamId()
+      let opened = false
+      let failed = false
       try {
-        for await (const event of this._sseSession({ signal, lastEventId })) {
+        for await (const event of this._sseSession({ signal, lastEventId, stream })) {
           if (event._sseId) lastEventId = event._sseId
           delay = 1000
           // Surface the synthetic 'open' sentinel as `{ type: 'sse/open' }`
@@ -2664,7 +2760,8 @@ class SynthigyClient {
           // server has created the event stream (otherwise the POST races
           // stream creation and the subscription is silently lost).
           if (event._sseEvent === 'open') {
-            yield { type: 'sse/open' }
+            opened = true
+            yield { type: 'sse/open', stream: event.stream }
             continue
           }
           // Strip internal SSE metadata before handing the payload to
@@ -2675,200 +2772,16 @@ class SynthigyClient {
         }
       } catch (e) {
         if (signal?.aborted || e?.name === 'AbortError') return
-        if (e?.code === 'UNAUTHORIZED' || e?.code === 'FORBIDDEN') throw e
+        if (e?.code === 'UNAUTHORIZED' || e?.code === 'FORBIDDEN' || e?.status === 403) throw e
+        failed = true
+      }
+      if (opened && !signal?.aborted) yield { type: 'sse/close', stream }
+      if (failed) {
         await new Promise(r => setTimeout(r, delay))
         delay = Math.min(delay * 2, 30000)
       }
     }
   }
-
-  // --------------------------------------------------------------------------
-  // observe(descriptor) — one-call live primitive
-  //
-  // Bundles subscribe + SSE + auto-reconnect + (opt-in) history backfill into
-  // a single async iterable. The server tears down subscription state on
-  // SSE close, so observe() re-subscribes before each new SSE session.
-  // --------------------------------------------------------------------------
-
-  /**
-   * Subscribe to a record-set and yield change events as an async iterable.
-   *
-   * The descriptor identifies which records to watch — either a bare
-   * array of xids or `{records, operations?}`. Record events fire when
-   * an envelope's `record-xid` is in the set; relation events fire when
-   * either endpoint of a relation link/unlink is in the set (server
-   * rotates the wire so `data[0]` is always the subscribed endpoint).
-   *
-   * Each event is the record-shaped envelope: record
-   * events carry `before` / `after` attribute maps (already keyed by
-   * attribute key, not attribute-xid); relation events carry a `data`
-   * tuple `[subscribed-xid, other-xid]`. Both carry `actor` / `txid` /
-   * `request` / `scope` / `tenant` provenance as xids — resolve on
-   * demand if you need names.
-   *
-   * On each SSE session this:
-   *   1. POSTs `/data/subscription/set` with this descriptor (set-replace).
-   *   2. Opens a single SSE session via `/data/events`.
-   *   3. Yields events whose record-xid OR data[0] is in the set.
-   *   4. On disconnect: optionally backfills missed events from
-   *      `/history events`, then re-subscribes and reconnects.
-   *
-   * Cleanup on iterator close: unsubscribes this descriptor.
-   *
-   * @param {string[]|{records: string[], operations?: string[]}} descriptor
-   * @param {Object} [opts]
-   * @param {string} [opts.key] - Stable subscription handle; defaults to
-   *        a hash of the descriptor.
-   * @param {AbortSignal} [opts.signal] - Cancel the loop
-   * @param {boolean} [opts.backfill=false] - Replay /history events
-   *        missed during disconnect.
-   * @param {number} [opts.backfillLimit=1000] - Max history rows per
-   *        backfill pass.
-   * @yields {ObserveEvent} — see ObserveEvent in index.d.ts for the
-   *        discriminated-union shape.
-   *
-   * @example
-   * ```js
-   * for await (const ev of client.observe(['u-abc'])) {
-   *   if (ev.type === 'record/update') diffRender(ev.before, ev.after)
-   * }
-   *
-   * for await (const ev of client.observe({
-   *   records: [userXid, teamXid],
-   *   operations: ['update', 'link'],
-   * })) { ... }
-   * ```
-   */
-  async *observe(descriptor, opts) {
-    const normalized = _normalizeDescriptor(descriptor)
-    const key = opts?.key ?? _descriptorKey(normalized)
-    const signal = opts?.signal
-    const backfillEnabled = opts?.backfill === true
-    const backfillLimit = opts?.backfillLimit ?? 1000
-    let lastSeenTs = null
-    let delay = 1000
-
-    try {
-      while (!signal?.aborted) {
-        try {
-          // Server tears subscription state down on SSE close, so we
-          // re-register the descriptor before each new session.
-          this._dataSubs.set(key, normalized)
-          await this._flushSubscriptions()
-
-          for await (const raw of this._sseSession({ signal })) {
-            // `raw` is the channel payload plus _sseEvent / _sseId
-            // metadata. Strip the metadata; emit the channel envelope.
-            const { _sseEvent: _evt, _sseId: _id, ...payload } = raw
-            // Only entity/relation channel events have a slash-typed
-            // type; anything else (heartbeats, future event kinds) is
-            // skipped.
-            const channelType = payload.type
-            if (typeof channelType !== 'string' || !channelType.includes('/')) continue
-            // Defense-in-depth filter: plug already gates by records;
-            // double-check here so multiple parallel observe()s on one
-            // client don't cross-deliver.
-            if (!_eventMatchesDescriptor(payload, normalized)) continue
-            if (payload.ts) lastSeenTs = payload.ts
-            delay = 1000
-            yield payload
-          }
-        } catch (e) {
-          if (signal?.aborted || e?.name === 'AbortError') return
-          if (e?.code === 'UNAUTHORIZED' || e?.code === 'FORBIDDEN') throw e
-        }
-
-        if (signal?.aborted) return
-
-        if (backfillEnabled && lastSeenTs) {
-          try {
-            const now = new Date().toISOString()
-            const events = await this.history.events({
-              between: [lastSeenTs, now],
-              track: 'entity',
-              limit: backfillLimit,
-            })
-            // /history events are attribute-primary (one row per changed
-            // attribute). Fold into one observe event per (record, op)
-            // and reconstruct a partial `after` map from the rows. The
-            // shape is best-effort: not as rich as live, but a faithful
-            // diff for the rows that landed in __audit_entity.
-            const byKey = new Map()  // `${recordXid}::${op}` → folded event
-            for (const ev of events) {
-              const xid = ev.recordXid ?? ev['record-xid']
-              if (!xid) continue
-              // Skip backfill rows for records outside our watch set.
-              if (!normalized.records.has(xid)) continue
-              const op = ev.op
-              const foldKey = `${xid}::${op}`
-              const channelType = `record/${op === 'change' ? 'update' : op}`
-              let folded = byKey.get(foldKey)
-              if (!folded) {
-                folded = {
-                  type: channelType,
-                  ts: ev.ts,
-                  'record-xid': xid,
-                  txid: ev.txid,
-                  actor: ev.actorXid ?? ev['actor-xid'],
-                  request: ev.requestId ?? ev['request-id'],
-                  scope: ev.scopeXid ?? ev['scope-xid'],
-                  after: {},
-                  fromBackfill: true,
-                }
-                byKey.set(foldKey, folded)
-              }
-              // Backfill rows are attribute-primary and key by attribute-xid;
-              // live events come in attribute-key-keyed (server-translated).
-              // We leave backfill as-is — consumer can detect via `fromBackfill`
-              // and either translate or use as-is. Live events never carry
-              // this flag.
-              const attrXid = ev.attributeXid ?? ev['attribute-xid']
-              if (attrXid && attrXid !== '__delete__') {
-                folded.after[attrXid] = ev.value
-              }
-              if (ev.ts > (folded.ts ?? '')) folded.ts = ev.ts
-            }
-            for (const folded of byKey.values()) {
-              if (folded.type === 'record/delete') delete folded.after
-              if (folded.ts) lastSeenTs = folded.ts
-              yield folded
-            }
-          } catch (_e) {
-            // HISTORY_UNAVAILABLE / 404 / etc. — best-effort.
-          }
-        }
-
-        await new Promise((r) => setTimeout(r, delay))
-        delay = Math.min(delay * 2, 30000)
-      }
-    } finally {
-      if (this._dataSubs.delete(key)) {
-        await this._flushSubscriptions().catch(() => {})
-      }
-    }
-  }
-}
-
-/**
- * True if the channel-shaped event matches the observer's descriptor.
- * Record events match by record-xid; relation events match on `data[0]`
- * (server already rotated so position 0 is the subscribed-perspective
- * endpoint — when both endpoints sat in the identity's union the server
- * emitted two events, one per perspective, so per-observer we just check
- * position 0). Used by observe() to demultiplex when multiple observe()
- * calls share one client's SSE session.
- *
- * @private
- */
-function _eventMatchesDescriptor(event, descriptor) {
-  const records = descriptor.records
-  if (!records || records.size === 0) return false
-  const recordXid = event['record-xid']
-  if (recordXid) return records.has(recordXid)
-  if (Array.isArray(event.data) && event.data.length >= 2) {
-    return records.has(event.data[0])
-  }
-  return false
 }
 
 // ============================================================================
@@ -3070,17 +2983,10 @@ export const login         = () => _dflt().login
 
 // Streaming + live watches
 export const listen           = (...a) => _dflt().listen(...a)
-export const observe          = (...a) => _dflt().observe(...a)
 export const watch            = (...a) => _dflt().watch(...a)
 export const watchSchema      = (...a) => _dflt().watchSchema(...a)
 export const watchQuery       = (...a) => _dflt().watchQuery(...a)
 export const watchSqlTemplate = (...a) => _dflt().watchSqlTemplate(...a)
 
-// Subscriptions (advanced — prefer the watch family)
-export const subscribe          = (...a) => _dflt().subscribe(...a)
-export const unsubscribe        = (...a) => _dflt().unsubscribe(...a)
-export const subscribeModel     = (...a) => _dflt().subscribeModel(...a)
-export const unsubscribeModel   = (...a) => _dflt().unsubscribeModel(...a)
-export const setSubscriptions   = (...a) => _dflt().setSubscriptions(...a)
-export const clearSubscriptions = (...a) => _dflt().clearSubscriptions(...a)
+// Subscriptions
 export const subscriptions      = (...a) => _dflt().subscriptions(...a)

@@ -385,10 +385,28 @@ export class WatchMultiplexer {
 
   async _flush() {
     const covered = [...this._watches]
+    let posted = true
     try {
-      await this._postUnion()
+      posted = await this._postUnion()
     } finally {
-      this._settleSubscribed(covered)
+      if (posted !== false) this._settleSubscribed(covered)
+    }
+  }
+
+  /** POSTs the union to this mux's open stream; false when there is none yet (the next sse/open posts it). */
+  async _postToStream(items, sig) {
+    const stream = this._streamId
+    if (!stream) return false
+    if (sig === this._lastUnion) return true
+    try {
+      await this._client._setSubscriptions(items, { stream })
+      if (this._streamId !== stream) return false
+      this._lastUnion = sig
+      return true
+    } catch (e) {
+      if (e?.code !== 'STREAM_NOT_FOUND') throw e
+      if (this._streamId === stream) this._streamId = null
+      return false
     }
   }
 
@@ -396,11 +414,7 @@ export class WatchMultiplexer {
     if (!this._watches.size) {
       // empty union: still POST so server drops what we held
       const items = []
-      const sig = JSON.stringify(items)
-      if (sig === this._lastUnion) return
-      this._lastUnion = sig
-      await this._client.setSubscriptions(items)
-      return
+      return this._postToStream(items, JSON.stringify(items))
     }
     // Compute the union across all live Watches. Two distinct things
     // share unfortunate naming:
@@ -413,19 +427,20 @@ export class WatchMultiplexer {
     const entities = new Set()
     const namedRelations = new Set()
     const ops = new Set()
-    let anyOps = false
+    let anyOps = false, allOps = false
     for (const w of this._watches) {
       const i = w.interest
       if (i.records)   for (const x of i.records)   records.add(x)
       if (i.entities)  for (const e of i.entities)  entities.add(e)
       if (i.relations) for (const r of i.relations) namedRelations.add(r)
-      if (i.ops) { anyOps = true; for (const o of i.ops) ops.add(o) }
+      if (i.records?.length && !i.ops?.length) allOps = true
+      if (i.records?.length && i.ops?.length) { anyOps = true; for (const o of i.ops) ops.add(o) }
     }
     // Wire items: one per track that has interest.
     const items = []
     if (records.size) {
       const item = { type: 'data', records: [...records].sort() }
-      if (anyOps) item.operations = [...ops].sort()
+      if (anyOps && !allOps) item.operations = [...ops].sort()
       items.push(item)
     }
     if (entities.size) {
@@ -436,10 +451,7 @@ export class WatchMultiplexer {
     }
     if (this._wantSchema) items.push({ type: 'runtime-model' })
 
-    const sig = JSON.stringify(items)
-    if (sig === this._lastUnion) return
-    this._lastUnion = sig
-    await this._client.setSubscriptions(items)
+    return this._postToStream(items, JSON.stringify(items))
   }
 
   _ensureSseOpen() {
@@ -461,6 +473,8 @@ export class WatchMultiplexer {
     this._sseAbort = null
     this._ssePromise = null
     this._lastUnion = null
+    this._streamId = null
+    this._sseEverOpened = false
   }
 
   /**
@@ -496,15 +510,19 @@ export class WatchMultiplexer {
           // the mux as "SSE-opened-at-least-once" so subsequent
           // register/interest-change can flush directly without racing.
           if (ev?.type === 'sse/open') {
+            if (!firstSession) this._fanOutSentinel({ type: 'connection/resumed', gap: [null, null] })
+            firstSession = false
+            this._streamId = ev.stream
             this._sseEverOpened = true
-            this._flush().catch((e) => {
-              for (const w of this._watches) w._pushSentinel({
-                type: 'subscription/rejected',
-                reason: e?.message ?? 'set-subscriptions failed',
-                error: e,
-                records: [],
-              })
-            })
+            this._lastUnion = null
+            this._scheduleFlush()
+            continue
+          }
+          if (ev?.type === 'sse/close') {
+            if (ev.stream === this._streamId) {
+              this._streamId = null
+              this._lastUnion = null
+            }
             continue
           }
           // Schema deploy notification?
@@ -532,13 +550,13 @@ export class WatchMultiplexer {
           records: [],
         })
         this._settleSubscribed()
+        if (this._sseAbort?.signal === signal) {
+          this._sseAbort = null
+          this._ssePromise = null
+          this._lastUnion = null
+          this._sseEverOpened = false
+        }
         return
-      } finally {
-        if (!firstSession) this._fanOutSentinel({
-          type: 'connection/resumed',
-          gap: [null, null],
-        })
-        firstSession = false
       }
     }
   }
@@ -649,8 +667,10 @@ function shallowEq(a, b) {
  * and closes every iterator.
  */
 export class Watch {
-  constructor(mux, interest, { backpressure = 'coalesce', bufferSize = 100, signal } = {}) {
+  constructor(mux, interest, { backpressure = 'coalesce', bufferSize = 100, signal, backfill = false, backfillLimit = 1000 } = {}) {
     this._mux = mux
+    this._backfill = backfill ? { limit: backfillLimit } : null
+    this._lastTs = null
     this._interest = normalizeInterest(interest)
     this._iterators = new Set()
     this._closed = false
@@ -791,6 +811,7 @@ export class Watch {
 
   _pushEvent(event) {
     if (this._closed) return
+    if (this._replaying && !event.fromBackfill) { this._replaying.push({ event }); return }
     if (event.request && this._mutedRequests.has(event.request)) {
       // Consumed: drop the muted record entry so a second event with
       // the same request-id (rare) is not silently dropped.
@@ -799,13 +820,70 @@ export class Watch {
       this._mutedRequests.delete(event.request)
       return
     }
+    if (event.ts && (!this._lastTs || event.ts > this._lastTs)) this._lastTs = event.ts
     for (const it of this._iterators) it.buf.push(event)
   }
 
   _pushSentinel(sentinel) {
     if (this._closed) return
+    if (this._replaying) { this._replaying.push({ sentinel }); return }
+    if (sentinel.type === 'connection/resumed' && this._backfill && this._lastTs && this._interest.records?.length) {
+      this._replayGap(sentinel)
+      return
+    }
     for (const it of this._iterators) it.buf.push(sentinel)
   }
+
+  /** Pushes the record events missed since the last one seen, from /history, then the resumed sentinel, then the live events held meanwhile. */
+  async _replayGap(sentinel) {
+    this._replaying = []
+    try {
+      const from = this._lastTs
+      const between = [from, new Date().toISOString()]
+      const records = this._interest.records
+      const rows = []
+      for (let i = 0; i < records.length; i += 8) {
+        const pages = await Promise.allSettled(records.slice(i, i + 8).map((recordXid) =>
+          this._mux._client.history.events({ between, track: 'entity', recordXid, limit: this._backfill.limit })))
+        for (const p of pages) if (p.status === 'fulfilled') rows.push(...(p.value ?? []))
+      }
+      for (const ev of foldHistory(rows, new Set(records), from)) {
+        if (_opMatch(this._interest.ops, ev.type)) {
+          if (ev.after) ev.after = this._mux._resolveAttrMap(ev.after)
+          this._pushEvent(ev)
+        }
+      }
+    } catch { /* history unavailable: the sentinel still says there was a gap */ }
+    const held = this._replaying
+    this._replaying = null
+    if (this._closed) return
+    for (const it of this._iterators) it.buf.push(sentinel)
+    for (const h of held) h.sentinel ? this._pushSentinel(h.sentinel) : this._pushEvent(h.event)
+  }
+}
+
+/** Folds attribute-level /history rows into one record event per (record, op) after `from`, marked fromBackfill. */
+export function foldHistory(rows, records, from) {
+  const byKey = new Map()
+  for (const row of rows ?? []) {
+    const xid = row.recordXid ?? row['record-xid']
+    if (!xid || !records.has(xid) || !(row.ts > from)) continue
+    const type = `record/${row.op === 'change' ? 'update' : row.op}`
+    const key = `${xid}::${type}`
+    let ev = byKey.get(key)
+    if (!ev) {
+      ev = { type, record: xid, ts: row.ts, txid: row.txid, actor: row.actorXid ?? row['actor-xid'],
+             request: row.requestId ?? row['request-id'], scope: row.scopeXid ?? row['scope-xid'],
+             after: {}, fromBackfill: true }
+      byKey.set(key, ev)
+    }
+    const attr = row.attributeXid ?? row['attribute-xid']
+    if (attr && attr !== '__delete__') ev.after[attr] = row.value
+    if (row.ts > ev.ts) ev.ts = row.ts
+  }
+  const out = [...byKey.values()].sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0))
+  for (const ev of out) if (ev.type === 'record/delete') delete ev.after
+  return out
 }
 
 function _opMatch(ops, type) {

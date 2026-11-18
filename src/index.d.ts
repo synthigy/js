@@ -129,29 +129,13 @@ export interface SubscribeEvent {
   /**
    * The delta kind from the envelope payload: 'record/insert' | 'record/update'
    * | 'record/delete' | 'relation/link' | 'relation/unlink' |
-   * 'entity/touched' | 'relation/touched' (plus the SDK's 'sse/open' sentinel).
+   * 'entity/touched' | 'relation/touched' (plus the SDK's 'sse/open' and
+   * 'sse/close' sentinels, each carrying `stream`: a connection opened / ended).
    * NOT the SSE `event:` field — that is always the literal 'data'. This is the
-   * raw envelope; the typed shape is ObserveEvent (see observe()).
+   * raw envelope; `watch()` yields the typed shape (WatchEvent).
    */
   type: string
   [key: string]: unknown
-}
-
-/**
- * A subscription descriptor declares the records a consumer is watching.
- * Most callers pass a bare array of xids; the object form lets you also
- * narrow by operation.
- *
- *   subscribe(['u-abc', 'u-def'])
- *   subscribe({ records: ['u-abc'], operations: ['update', 'link'] })
- */
-export type Descriptor =
-  | string[]
-  | { records: string[]; operations?: string[] }
-
-export interface SubscribeOpts {
-  /** Stable handle for later unsubscribe(); defaults to a hash of the descriptor. */
-  key?: string
 }
 
 export interface ListenOpts {
@@ -163,15 +147,6 @@ export interface SubscriptionInfo {
   type?: 'data' | 'deployed-model' | 'runtime-model'
   records?: string[]
   operations?: string[]
-}
-
-export interface SubscriptionItem {
-  type?: 'data' | 'deployed-model' | 'runtime-model'
-  /** Required for `type: "data"`. Non-empty array of xid strings. */
-  records?: string[]
-  operations?: string[]
-  /** Optional stable handle for later unsubscribe(). */
-  key?: string
 }
 
 // ============================================================================
@@ -537,6 +512,9 @@ export interface Schema {
  *   FK_VIOLATION, UNIQUE_VIOLATION, NOT_NULL_VIOLATION,
  *   CHECK_VIOLATION, TYPE_CAST_FAILURE, TIMEOUT
  *
+ * Capacity:
+ *   SERVER_BUSY — HTTP 503 with Retry-After; the request never ran.
+ *
  * Transport / catch-all:
  *   HTTP_ERROR, OPERATION_ERROR, INTERNAL_ERROR
  *
@@ -562,6 +540,7 @@ export type SynthigyErrorCode =
   | 'PARAM_MISSING' | 'PARAM_TYPE_MISMATCH'
   | 'FK_VIOLATION' | 'UNIQUE_VIOLATION' | 'NOT_NULL_VIOLATION'
   | 'CHECK_VIOLATION' | 'TYPE_CAST_FAILURE' | 'TIMEOUT'
+  | 'SERVER_BUSY'
   | 'HTTP_ERROR' | 'OPERATION_ERROR' | 'INTERNAL_ERROR'
   | 'FILE_NOT_FOUND' | 'FOLDER_NOT_FOUND' | 'FILE_NAME_TAKEN' | 'FILE_CHANGED'
   | 'FILE_NOT_READY' | 'FILE_TOO_LARGE' | 'ZIP_TOO_LARGE' | 'NAME_REQUIRED' | 'UNSUPPORTED_MEDIA_TYPE'
@@ -570,6 +549,15 @@ export type SynthigyErrorCode =
   | 'VERSION_EXPIRED' | 'INVALID_PATH' | 'INVALID_SETTINGS' | 'INVALID_QUERY'
   | 'METHOD_NOT_ALLOWED' | 'NOT_FOUND' | 'ENGINE_OWNED' | 'INVALID_SLICE'
   | 'LINKS_DISABLED' | 'LINK_NOT_FOUND' | 'INVALID_EXPIRES'
+  | 'BAD_DATA_SHAPE' | 'BAD_ORDER_BY_SHAPE' | 'BAD_REQUEST' | 'BETWEEN_UPPER_REQUIRED' | 'CLIENT_REQUIRED'
+  | 'CURSOR_REQUIRED' | 'DELETE_BATCH_LIMIT' | 'DIFF_TIMESTAMPS_REQUIRED' | 'ERASE_UNSUPPORTED'
+  | 'INVALID_FILTER' | 'INVALID_LOG_CONFIG' | 'INVALID_LOG_CONFIG_ACTION' | 'INVALID_LOG_FILTER'
+  | 'INVALID_OPERATION' | 'INVALID_ORDER' | 'INVALID_SELECTION' | 'INVALID_SELECTIONS' | 'INVALID_TEMPLATE_IDENTIFIER'
+  | 'INVALID_TIMESTAMP' | 'INVALID_VALUE' | 'MISSING_REFS' | 'NON_UNIQUE_MATCH' | 'OP_REQUIRED'
+  | 'PARAM_OPTIONAL_IN_OR' | 'RECORD_XID_REQUIRED' | 'SCHEMA_MISSING_CARDINALITY' | 'TYPE_MISMATCH'
+  | 'UNIQUE_KEY_REQUIRED' | 'DOC_NOT_FOUND' | 'REF_NOT_FOUND' | 'SCHEMA_UNKNOWN_ATTRIBUTE' | 'SCHEMA_UNKNOWN_ENTITY'
+  | 'SCHEMA_UNKNOWN_RELATION' | 'UNKNOWN_ROLE' | 'CONSTRAINT_VIOLATION' | 'DEPENDENT_OBJECTS' | 'GUARD_VIOLATION'
+  | 'HOOK_REFUSED' | 'LOCKED' | 'SCHEMA_CONFLICT' | 'DB_UNAVAILABLE'
   | (string & {})
 
 /** `whoami()` — the identity a call runs as. `client` is null in-process (no OAuth client). */
@@ -943,39 +931,8 @@ export class SynthigyClient {
   ): Promise<T>
 
   // ── Subscriptions ─────────────────────────────────────────────────────────
-  //
-  // The SDK tracks the active subscription set locally; each call below
-  // mutates that local set and POSTs the full set to the server's
-  // /data/subscription/set endpoint (full-set replacement semantics).
 
-  /**
-   * Add a record-scoped data subscription. Re-subscribing with the same
-   * descriptor (or same `opts.key`) replaces the prior entry.
-   *
-   *   subscribe(['u-abc', 'u-def'])
-   *   subscribe({ records: ['u-abc'], operations: ['update'] }, { key: 'page-detail' })
-   */
-  subscribe(descriptor: Descriptor, opts?: SubscribeOpts): Promise<{ ok: boolean }>
-
-  /**
-   * Remove a record-scoped data subscription. `handle` is either the
-   * `key` you used at subscribe-time or an equivalent descriptor.
-   */
-  unsubscribe(handle: string | Descriptor): Promise<{ ok: boolean }>
-
-  /** Subscribe to model deploy events. raw=true uses 'deployed-model'; otherwise 'runtime-model'. */
-  subscribeModel(opts?: { raw?: boolean }): Promise<{ ok: boolean }>
-
-  /** Unsubscribe from model deploy events. */
-  unsubscribeModel(opts?: { raw?: boolean }): Promise<{ ok: boolean }>
-
-  /** Replace the entire subscription set in one call. */
-  setSubscriptions(items: SubscriptionItem[]): Promise<{ ok: boolean }>
-
-  /** Clear all subscriptions for this session. */
-  clearSubscriptions(): Promise<{ ok: boolean }>
-
-  /** Fetch current subscription state from the server. */
+  /** The subscription set the engine holds for this client (set by its watches). */
   subscriptions(): Promise<{ subscriptions: SubscriptionInfo[] }>
 
   // ── Files — upload, download, versions ───────────────────────────────────
@@ -1120,25 +1077,6 @@ export class SynthigyClient {
    * Cancel via `AbortSignal`.
    */
   listen(opts?: ListenOpts): AsyncGenerator<SubscribeEvent>
-
-  /**
-   * One-call live primitive: subscribe + SSE + auto-reconnect (+ optional
-   * history backfill). Yields a typed event stream filtered to the
-   * records named by the descriptor. Cleanup on iterator close:
-   * unsubscribes locally.
-   *
-   * Server tears down subscription state on each SSE close, so observe()
-   * re-subscribes before every new SSE session. The plug's default
-   * best-effort delivery is normally enough; pass `backfill: true` to
-   * also replay `/history` events missed during a disconnect.
-   *
-   *   for await (const ev of client.observe(['u-abc'])) { ... }
-   *   for await (const ev of client.observe({
-   *     records: [userXid, teamXid],
-   *     operations: ['update', 'link'],
-   *   })) { ... }
-   */
-  observe(descriptor: Descriptor, opts?: ObserveOpts): AsyncGenerator<ObserveEvent>
 
   /**
    * Open a live, multiplexed subscription. Many `watch()` calls on the
@@ -1301,6 +1239,14 @@ export interface WatchOpts {
   /** Per-iterator buffer size (default 100). */
   bufferSize?: number
   signal?: AbortSignal
+  /**
+   * After a reconnect, replay the record events missed in the gap from `/history`
+   * (marked `fromBackfill: true`, attribute maps from the audit rows) before the
+   * `connection/resumed` sentinel. Records interest only; needs the audit module.
+   */
+  backfill?: boolean
+  /** Most history rows one replay reads (default 1000). */
+  backfillLimit?: number
 }
 
 /** Common provenance carried on every event. */
@@ -1326,6 +1272,8 @@ export interface RecordEvent extends WatchProvenance {
   after?: Record<string, unknown>
   /** Attribute-name list; computed by the SDK from before/after. */
   changed?: string[]
+  /** Set on events replayed from /history after a reconnect (WatchOpts.backfill). */
+  fromBackfill?: true
 }
 
 export interface RelationEvent extends WatchProvenance {
@@ -1371,95 +1319,6 @@ export class WatchError extends Error {
   constructor(message: string, code: string, details?: unknown)
 }
 
-// ============================================================================
-// Observe types — record-shaped envelope
-// ============================================================================
-
-export interface ObserveOpts {
-  signal?: AbortSignal
-  /** Stable subscription handle; defaults to a hash of the descriptor. */
-  key?: string
-  /** Replay /history events missed during disconnect (default: false). */
-  backfill?: boolean
-  /** Max rows per backfill pass (default: 1000). */
-  backfillLimit?: number
-}
-
-/**
- * Common provenance fields carried on every delta envelope.
- */
-export interface DeltaProvenance {
-  /** ISO-8601 timestamp captured by the trigger when the underlying change happened. */
-  ts: string
-  /** Tenant scope xid (install-level boundary). */
-  tenant?: string
-  /** Scope xid (per-record access scope, if set). */
-  scope?: string
-  /** Actor xid (the user who triggered the change). */
-  actor?: string
-  /** Request-id from the actor's request, if propagated through the trigger. */
-  request?: string
-  /** DB transaction id — same across all envelopes from one multi-row tx. */
-  txid?: number
-  /** Set to `true` on events replayed from /history during reconnect. */
-  fromBackfill?: boolean
-}
-
-/**
- * Record-track delta event. `before` is absent on `record/insert`;
- * `after` is absent on `record/delete`. The `before`/`after` maps are keyed by
- * the plug's raw attribute names — **snake_case**, NOT transformed to the
- * client's keyFormat (unlike `/data`, which cases keys per `key_format`). So
- * `after['release_year']` even under `keyFormat: 'kebab'`. Encrypted columns
- * carry their encrypted form; resolve via /data if you need decrypted values.
- */
-export interface RecordDeltaEvent extends DeltaProvenance {
-  type: 'record/insert' | 'record/update' | 'record/delete'
-  'record-xid': string
-  before?: Record<string, unknown>
-  after?: Record<string, unknown>
-}
-
-/**
- * Relation-track delta event for a link/unlink between two entities.
- * `data` is a `[subscribed-xid, other-xid]` tuple — server has rotated
- * so position 0 is always the endpoint in your watched record set.
- * When the identity's union covers BOTH endpoints, the server emits
- * two events per link with rotated tuples (same `ts`/`txid`/provenance);
- * dedupe by `txid` + sorted-endpoints if you want one per underlying link.
- */
-export interface RelationDeltaEvent extends DeltaProvenance {
-  type: 'relation/link' | 'relation/unlink'
-  data: [string, string]
-}
-
-/**
- * Coalesced cache-invalidation poke for an entity track subscription.
- * `entity` is the client's verbatim original string (server echoes back
- * exactly what was subscribed to, before any case/whitespace/separator
- * normalization).
- */
-export interface EntityTouchedEvent {
-  type: 'entity/touched'
-  entity: string
-  ts: string
-}
-
-/**
- * Coalesced cache-invalidation poke for a relation track subscription.
- * `relation` is the client's verbatim original string.
- */
-export interface RelationTouchedEvent {
-  type: 'relation/touched'
-  relation: string
-  ts: string
-}
-
-export type ObserveEvent =
-  | RecordDeltaEvent
-  | RelationDeltaEvent
-  | EntityTouchedEvent
-  | RelationTouchedEvent
 
 // ============================================================================
 // Operator helpers
@@ -1603,16 +1462,9 @@ export function files(): SynthigyClient['files']
 export function login(): SynthigyClient['login']
 
 export const listen: SynthigyClient['listen']
-export const observe: SynthigyClient['observe']
 export const watch: SynthigyClient['watch']
 export const watchSchema: SynthigyClient['watchSchema']
 export const watchQuery: SynthigyClient['watchQuery']
 export const watchSqlTemplate: SynthigyClient['watchSqlTemplate']
 
-export const subscribe: SynthigyClient['subscribe']
-export const unsubscribe: SynthigyClient['unsubscribe']
-export const subscribeModel: SynthigyClient['subscribeModel']
-export const unsubscribeModel: SynthigyClient['unsubscribeModel']
-export const setSubscriptions: SynthigyClient['setSubscriptions']
-export const clearSubscriptions: SynthigyClient['clearSubscriptions']
 export const subscriptions: SynthigyClient['subscriptions']

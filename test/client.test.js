@@ -267,6 +267,17 @@ describe('error handling', () => {
     }
   })
 
+  it('classifies the engine codes', () => {
+    for (const [code, category, retryable] of [
+      ['BAD_DATA_SHAPE', 'validation', false], ['REF_NOT_FOUND', 'not_found', false],
+      ['GUARD_VIOLATION', 'conflict', false], ['DB_UNAVAILABLE', 'internal', true],
+      ['DB_ERROR', 'internal', false],
+    ]) {
+      const e = new SynthigyError('x', code)
+      assert.deepEqual([e.category, e.retryable], [category, retryable], code)
+    }
+  })
+
   it('classifies permission denials as iam', () => {
     for (const code of ['RELATION_FORBIDDEN', 'ATTRIBUTE_FORBIDDEN', 'ROW_FORBIDDEN',
                         'CREATE_FORBIDDEN', 'DELETE_FORBIDDEN', 'SLOT_OCCUPIED']) {
@@ -282,9 +293,9 @@ describe('error handling', () => {
 
     assert.equal(new SynthigyError('x', 'SOME_FUTURE_CODE').category, 'internal')
     assert.equal(new SynthigyError('x', 'SOME_FUTURE_CODE').retryable, false)
-    failWith({ code: 'DB_UNAVAILABLE', retryable: true })
+    failWith({ code: 'DB_ERROR', retryable: true })
     await assert.rejects(client.search('user', {}, { name: null }), (e) => e.retryable === true)
-    failWith({ code: 'DB_UNAVAILABLE' })
+    failWith({ code: 'DB_ERROR' })
     await assert.rejects(client.search('user', {}, { name: null }), (e) => e.retryable === false)
     failWith({ code: 'RELATION_FORBIDDEN', relation: 'r1' })
     await assert.rejects(client.search('user', {}, { name: null }),
@@ -337,6 +348,89 @@ describe('error handling', () => {
       () => client.search('user', {}, { name: null }),
       (err) => err instanceof SynthigyError && err.code === 'FORBIDDEN' && err.message === 'Access denied'
     )
+  })
+
+  const busyClient = () => {
+    const client = createClient({ endpoint: 'http://localhost', token: 't' })
+    client._busyDelay = () => 1
+    return client
+  }
+  const busy = (code = 'SERVER_BUSY') => mockResponse(503, { error: { message: 'busy', code, retryable: true } })
+
+  it('resends a SERVER_BUSY request until it gets in', async () => {
+    const client = busyClient()
+    let calls = 0
+    mockFetch.mock.mockImplementation(async () =>
+      ++calls <= 2 ? busy() : mockResponse(200, { results: [{ ok: true, data: [] }] }))
+    assert.deepEqual(await client.search('movie', {}, { title: null }), [])
+    assert.equal(calls, 3)
+  })
+
+  it('gives up on SERVER_BUSY after three attempts with a retryable rate_limit error', async () => {
+    const client = busyClient()
+    let calls = 0
+    mockFetch.mock.mockImplementation(async () => { calls++; return busy() })
+    await assert.rejects(
+      () => client.search('movie', {}, { title: null }),
+      (err) => err instanceof SynthigyError && err.code === 'SERVER_BUSY' && err.category === 'rate_limit' &&
+        err.retryable === true && err.status === 503
+    )
+    assert.equal(calls, 3)
+  })
+
+  it('a listen refused with any 403 stops instead of reconnecting', async () => {
+    const client = createClient({ endpoint: 'http://localhost', token: 't' })
+    let calls = 0
+    mockFetch.mock.mockImplementation(async () => {
+      calls++
+      return mockResponse(403, { error: { message: 'no', code: 'ENTITY_FORBIDDEN' } })
+    })
+    await assert.rejects(client.listen({ signal: AbortSignal.timeout(3000) }).next(),
+      (e) => e.code === 'ENTITY_FORBIDDEN' && e.status === 403)
+    assert.equal(calls, 1)
+  })
+
+  it('never waits past the client timeout', async () => {
+    const client = createClient({ endpoint: 'http://localhost', token: 't', timeout: 200 })
+    client._busyDelay = () => 60_000
+    let calls = 0
+    mockFetch.mock.mockImplementation(async () => { calls++; return busy() })
+    const started = Date.now()
+    await assert.rejects(() => client.search('movie', {}, { title: null }), (err) => err.code === 'SERVER_BUSY')
+    assert.equal(calls, 1)
+    assert.ok(Date.now() - started < 1000)
+  })
+
+  it('a resend gets only what is left of the client timeout', async () => {
+    const client = createClient({ endpoint: 'http://localhost', token: 't', timeout: 400 })
+    client._busyDelay = () => 150
+    let calls = 0
+    mockFetch.mock.mockImplementation(async (_url, opts) => {
+      if (++calls === 1) { await new Promise((r) => setTimeout(r, 100)); return busy() }
+      return new Promise((_res, rej) => opts.signal.addEventListener('abort', () => rej(opts.signal.reason), { once: true }))
+    })
+    const started = Date.now()
+    await assert.rejects(() => client.search('movie', {}, { title: null }))
+    const took = Date.now() - started
+    assert.equal(calls, 2)
+    assert.ok(took < 550, `the whole call stays near the 400 ms timeout, took ${took} ms`)
+  })
+
+  it('does not resend other refusals', async () => {
+    const client = busyClient()
+    let calls = 0
+    mockFetch.mock.mockImplementation(async () => { calls++; return busy('MODULE_NOT_LOADED') })
+    await assert.rejects(() => client.search('movie', {}, { title: null }))
+    assert.equal(calls, 1)
+  })
+
+  it('waits Retry-After seconds with jitter', () => {
+    const client = createClient({ endpoint: 'http://localhost', token: 't' })
+    for (let i = 0; i < 200; i++) {
+      const d2 = client._busyDelay('2'), d = client._busyDelay(undefined)
+      assert.ok(d2 >= 1000 && d2 < 3000, `Retry-After 2 gave ${d2}`)
+      assert.ok(d >= 500 && d < 1500, `no Retry-After gave ${d}`)
+    }
   })
 
   it('falls back to FORBIDDEN code when 403 body has no code', async () => {
@@ -441,7 +535,7 @@ describe('error handling', () => {
       ['compile', 400, { error: stamp }, () => client.compile('movie\n  title\n')],
       ['compile per-op', 200, { results: [{ ok: false, error: stamp }] }, () => client.compile('movie\n  title\n')],
       ['history', 400, { error: stamp }, () => client.history.events()],
-      ['subscription set', 400, { error: stamp }, () => client.clearSubscriptions()],
+      ['subscription set', 400, { error: stamp }, () => client._clearSubscriptions()],
       ['subscription status', 400, { error: stamp }, () => client.subscriptions()],
       ['files', 400, { error: stamp }, () => client.files.info('/site/logo.png')],
       ['deploy', 200, { results: [{ ok: false, error: stamp }] }, () => client.deploy('{}')],
@@ -1111,7 +1205,7 @@ describe('subscriptions (records-only set-replace contract)', () => {
       return mockResponse(200, { ok: true })
     })
 
-    const result = await client.subscribe(['u-def', 'u-abc'])  // unsorted input
+    const result = await client._subscribe(['u-def', 'u-abc'])  // unsorted input
     assert.deepEqual(result, { ok: true })
   })
 
@@ -1126,13 +1220,13 @@ describe('subscriptions (records-only set-replace contract)', () => {
       return mockResponse(200, { ok: true })
     })
 
-    await client.subscribe({ records: ['u-abc'], operations: ['update', 'link'] })
+    await client._subscribe({ records: ['u-abc'], operations: ['update', 'link'] })
   })
 
   it('subscribe rejects the legacy entity-firehose string form with a clear error', async () => {
     const client = createClient({ endpoint: 'http://localhost', token: 't' })
     await assert.rejects(
-      () => client.subscribe('User'),
+      () => client._subscribe('User'),
       (err) => err instanceof SynthigyError && err.code === 'INVALID_SUBSCRIPTION'
     )
   })
@@ -1140,11 +1234,11 @@ describe('subscriptions (records-only set-replace contract)', () => {
   it('subscribe rejects empty records arrays', async () => {
     const client = createClient({ endpoint: 'http://localhost', token: 't' })
     await assert.rejects(
-      () => client.subscribe([]),
+      () => client._subscribe([]),
       (err) => err instanceof SynthigyError && err.code === 'EMPTY_RECORDS'
     )
     await assert.rejects(
-      () => client.subscribe({ records: [] }),
+      () => client._subscribe({ records: [] }),
       (err) => err instanceof SynthigyError && err.code === 'EMPTY_RECORDS'
     )
   })
@@ -1158,8 +1252,8 @@ describe('subscriptions (records-only set-replace contract)', () => {
       return mockResponse(200, { ok: true })
     })
 
-    await client.subscribe(['u-1'])
-    await client.subscribe(['u-2'])
+    await client._subscribe(['u-1'])
+    await client._subscribe(['u-2'])
 
     assert.equal(bodies.length, 2)
     assert.deepEqual(bodies[0].subscriptions, [{ type: 'data', records: ['u-1'] }])
@@ -1178,8 +1272,8 @@ describe('subscriptions (records-only set-replace contract)', () => {
       return mockResponse(200, { ok: true })
     })
 
-    await client.subscribe(['u-1', 'u-2'])
-    await client.subscribe(['u-2', 'u-1'])  // same records, different order
+    await client._subscribe(['u-1', 'u-2'])
+    await client._subscribe(['u-2', 'u-1'])  // same records, different order
 
     // Both POSTs land but the second is identical to the first.
     assert.equal(bodies.length, 2)
@@ -1196,8 +1290,8 @@ describe('subscriptions (records-only set-replace contract)', () => {
       return mockResponse(200, { ok: true })
     })
 
-    await client.subscribe(['u-1'], { key: 'page' })
-    await client.subscribe(['u-2'], { key: 'page' })
+    await client._subscribe(['u-1'], { key: 'page' })
+    await client._subscribe(['u-2'], { key: 'page' })
 
     assert.deepEqual(bodies[1].subscriptions, [{ type: 'data', records: ['u-2'] }])
   })
@@ -1211,9 +1305,9 @@ describe('subscriptions (records-only set-replace contract)', () => {
       return mockResponse(200, { ok: true })
     })
 
-    await client.subscribe(['u-1'], { key: 'a' })
-    await client.subscribe(['u-2'], { key: 'b' })
-    await client.unsubscribe('a')
+    await client._subscribe(['u-1'], { key: 'a' })
+    await client._subscribe(['u-2'], { key: 'b' })
+    await client._unsubscribe('a')
 
     assert.deepEqual(bodies[2].subscriptions, [{ type: 'data', records: ['u-2'] }])
   })
@@ -1227,9 +1321,9 @@ describe('subscriptions (records-only set-replace contract)', () => {
       return mockResponse(200, { ok: true })
     })
 
-    await client.subscribe(['u-1'])
-    await client.subscribe(['u-2'])
-    await client.unsubscribe(['u-1'])    // descriptor form
+    await client._subscribe(['u-1'])
+    await client._subscribe(['u-2'])
+    await client._unsubscribe(['u-1'])    // descriptor form
 
     assert.deepEqual(bodies[2].subscriptions, [{ type: 'data', records: ['u-2'] }])
   })
@@ -1242,7 +1336,7 @@ describe('subscriptions (records-only set-replace contract)', () => {
       return mockResponse(200, { ok: true })
     })
 
-    const result = await client.unsubscribe('unknown-key')
+    const result = await client._unsubscribe('unknown-key')
     assert.deepEqual(result, { ok: true })
     assert.equal(calls, 0, 'no HTTP call when handle is unknown')
   })
@@ -1256,7 +1350,7 @@ describe('subscriptions (records-only set-replace contract)', () => {
       return mockResponse(200, { ok: true })
     })
 
-    await client.subscribeModel()
+    await client._subscribeModel()
   })
 
   it('subscribeModel({raw:true}) uses deployed-model type', async () => {
@@ -1268,7 +1362,7 @@ describe('subscriptions (records-only set-replace contract)', () => {
       return mockResponse(200, { ok: true })
     })
 
-    await client.subscribeModel({ raw: true })
+    await client._subscribeModel({ raw: true })
   })
 
   it('setSubscriptions replaces the entire local set with descriptor items', async () => {
@@ -1280,8 +1374,8 @@ describe('subscriptions (records-only set-replace contract)', () => {
       return mockResponse(200, { ok: true })
     })
 
-    await client.subscribe(['old-1'])
-    await client.setSubscriptions([
+    await client._subscribe(['old-1'])
+    await client._setSubscriptions([
       { type: 'data', records: ['a-1', 'a-2'] },
       { type: 'data', records: ['b-1'], operations: ['update'] },
       { type: 'runtime-model' },
@@ -1297,11 +1391,11 @@ describe('subscriptions (records-only set-replace contract)', () => {
   it('setSubscriptions validates each item with the same rules as subscribe()', async () => {
     const client = createClient({ endpoint: 'http://localhost', token: 't' })
     await assert.rejects(
-      () => client.setSubscriptions([{ type: 'data' }]),
+      () => client._setSubscriptions([{ type: 'data' }]),
       (err) => err instanceof SynthigyError && err.code === 'INVALID_SUBSCRIPTION'
     )
     await assert.rejects(
-      () => client.setSubscriptions([{ type: 'data', records: [] }]),
+      () => client._setSubscriptions([{ type: 'data', records: [] }]),
       (err) => err instanceof SynthigyError && err.code === 'EMPTY_RECORDS'
     )
   })
@@ -1315,8 +1409,8 @@ describe('subscriptions (records-only set-replace contract)', () => {
       return mockResponse(200, { ok: true })
     })
 
-    await client.subscribe(['u-1'])
-    await client.clearSubscriptions()
+    await client._subscribe(['u-1'])
+    await client._clearSubscriptions()
 
     assert.deepEqual(bodies[bodies.length - 1], { subscriptions: [] })
   })
@@ -1346,7 +1440,7 @@ describe('subscriptions (records-only set-replace contract)', () => {
     )
 
     await assert.rejects(
-      () => client.subscribe(['u-1']),
+      () => client._subscribe(['u-1']),
       (err) => err instanceof SynthigyError && err.code === 'MISSING_RECORDS'
     )
   })
@@ -2127,7 +2221,7 @@ describe('listen', () => {
       'event: data\ndata: {"type":"relation/link","data":["u-1","m-9"],"ts":"2026-05-24T00:00:03Z","txid":3,"actor":"a-1"}\n\n'
 
     mockFetch.mock.mockImplementation(async (url, opts) => {
-      assert.equal(url, 'http://localhost/data/events')
+      assert.match(url, /^http:\/\/localhost\/data\/events\?stream=[0-9a-f]{32}$/, 'each connection names its own stream')
       assert.equal(opts.headers['Authorization'], 'Bearer t')
       const body = sseReader(sseText)
       const origGetReader = body.getReader.bind(body)
@@ -2194,6 +2288,10 @@ describe('listen', () => {
     }
 
     assert.equal(callCount, 2)
+    const close = events.splice(1, 1)[0]
+    assert.equal(close.type, 'sse/close', 'the ended session is announced before the reconnect')
+    assert.match(close.stream, /^[0-9a-f]{32}$/)
+    assert.match(mockFetch.mock.calls[0].arguments[0], new RegExp(`stream=${close.stream}$`), 'close names the session that ended')
     assert.equal(events.length, 1)
     assert.equal(events[0]['record-xid'], 'u-1')
   })
@@ -2210,343 +2308,6 @@ describe('listen', () => {
 
     assert.equal(mockFetch.mock.calls.length, 0)
     assert.equal(events.length, 0)
-  })
-})
-
-describe('observe', () => {
-  beforeEach(() => mockFetch.mock.resetCalls())
-
-  function sseReader(text) {
-    const encoded = new TextEncoder().encode(text)
-    let sent = false
-    return {
-      getReader() {
-        return {
-          async read() {
-            if (!sent) { sent = true; return { done: false, value: encoded } }
-            return { done: true, value: undefined }
-          },
-          cancel: () => {},
-        }
-      },
-    }
-  }
-
-  // Helper: build a fetch mock that:
-  //   - returns 200 ok-true to /data/subscription/set POSTs
-  //   - returns one SSE stream of `sseText` for /data/events GETs
-  //   - aborts `ac` once the SSE stream closes so the reconnect loop exits
-  //   - records each request body so the test can assert on subscribe content
-  function setupSseHarness(ac, sseText) {
-    const subscribeBodies = []
-    mockFetch.mock.mockImplementation(async (url, opts) => {
-      if (url === 'http://localhost/data/subscription/set') {
-        subscribeBodies.push(JSON.parse(opts.body))
-        return mockResponse(200, { ok: true })
-      }
-      if (url === 'http://localhost/data/events') {
-        const body = sseReader(sseText)
-        const origGetReader = body.getReader.bind(body)
-        body.getReader = () => {
-          const r = origGetReader()
-          const origRead = r.read.bind(r)
-          r.read = async () => {
-            const chunk = await origRead()
-            if (chunk.done) ac.abort()
-            return chunk
-          }
-          return r
-        }
-        return { ok: true, status: 200, body, text: async () => '' }
-      }
-      throw new Error(`unexpected fetch: ${url}`)
-    })
-    return subscribeBodies
-  }
-
-  it('subscribes a record-set then yields events matching record-xid', async () => {
-    const client = createClient({ endpoint: 'http://localhost', token: 't' })
-    const ac = new AbortController()
-    // u-1 and u-2 are in the watch set; r-1 is not.
-    const sseText =
-      'event: data\ndata: {"type":"record/update","record-xid":"u-1","ts":"2026-05-24T00:00:01Z","before":{"name":"A"},"after":{"name":"B"},"actor":"actor-1","txid":7}\n\n' +
-      'event: data\ndata: {"type":"record/delete","record-xid":"r-1","ts":"2026-05-24T00:00:02Z","before":{"name":"Admin"}}\n\n' +
-      'event: data\ndata: {"type":"record/insert","record-xid":"u-2","ts":"2026-05-24T00:00:03Z","after":{"name":"Carol"}}\n\n'
-
-    const subs = setupSseHarness(ac, sseText)
-
-    const events = []
-    for await (const ev of client.observe(['u-1', 'u-2'], { signal: ac.signal })) {
-      events.push(ev)
-    }
-
-    // r-1 filtered out by the SDK's defense-in-depth match (server
-    // wouldn't have sent it in production, but we want the SDK to
-    // gate the same way for parallel observe()s on one client).
-    assert.equal(events.length, 2, `events: ${JSON.stringify(events)}`)
-    assert.equal(events[0].type, 'record/update')
-    assert.equal(events[0]['record-xid'], 'u-1')
-    assert.deepEqual(events[0].before, { name: 'A' })
-    assert.deepEqual(events[0].after, { name: 'B' })
-    assert.equal(events[0].actor, 'actor-1')
-    assert.equal(events[0].txid, 7)
-    assert.equal(events[1].type, 'record/insert')
-    assert.deepEqual(events[1].after, { name: 'Carol' })
-    // First POST sets the record-scoped subscription; final POST (on cleanup) is empty.
-    assert.deepEqual(subs[0], {
-      subscriptions: [{ type: 'data', records: ['u-1', 'u-2'] }],
-    })
-    assert.deepEqual(subs[subs.length - 1].subscriptions, [])
-  })
-
-  it('passes operations through into the subscription item', async () => {
-    const client = createClient({ endpoint: 'http://localhost', token: 't' })
-    const ac = new AbortController()
-    const subs = setupSseHarness(ac, '')
-
-    const events = []
-    for await (const ev of client.observe(
-      { records: ['u-1'], operations: ['change'] },
-      { signal: ac.signal })) {
-      events.push(ev)
-    }
-
-    assert.deepEqual(subs[0].subscriptions, [{
-      type: 'data', records: ['u-1'], operations: ['change'],
-    }])
-  })
-
-  it('yields relation events when either endpoint matches the watch set', async () => {
-    const client = createClient({ endpoint: 'http://localhost', token: 't' })
-    const ac = new AbortController()
-    // u-1 is the watched xid. Server has rotated `data` so position 0 is
-    // always the subscribed endpoint:
-    //   first link  — u-1 was from-side  → data: [u-1, role-1]
-    //   second link — u-1 was to-side    → data: [u-1, team-x]
-    //   third link  — neither endpoint matches the watch set → filtered.
-    const sseText =
-      'event: data\ndata: {"type":"relation/link","data":["u-1","role-1"],"ts":"2026-05-24T00:00:01Z","actor":"a","txid":9}\n\n' +
-      'event: data\ndata: {"type":"relation/link","data":["u-1","team-x"],"ts":"2026-05-24T00:00:02Z","actor":"a","txid":10}\n\n' +
-      'event: data\ndata: {"type":"relation/link","data":["y-1","y-2"],"ts":"2026-05-24T00:00:03Z","actor":"a","txid":11}\n\n'
-    setupSseHarness(ac, sseText)
-
-    const events = []
-    for await (const ev of client.observe(['u-1'], { signal: ac.signal })) {
-      events.push(ev)
-    }
-
-    assert.equal(events.length, 2)
-    assert.equal(events[0].data[0], 'u-1')
-    assert.equal(events[1].data[0], 'u-1')
-  })
-
-  it('unsubscribes on iterator close (cleanup runs)', async () => {
-    const client = createClient({ endpoint: 'http://localhost', token: 't' })
-    const ac = new AbortController()
-    const sseText =
-      'event: data\ndata: {"type":"record/insert","record-xid":"u-1","ts":"t1","after":{}}\n\n'
-    const subs = setupSseHarness(ac, sseText)
-
-    for await (const _ev of client.observe(['u-1'], { signal: ac.signal })) {
-      // Single-iteration consumer; SSE ends and aborts.
-    }
-
-    // Verify the final POST cleared this descriptor.
-    const last = subs[subs.length - 1]
-    assert.deepEqual(last.subscriptions, [],
-      `Expected descriptor removed from final set: ${JSON.stringify(last)}`)
-  })
-
-  it('stops immediately when signal is already aborted', async () => {
-    const client = createClient({ endpoint: 'http://localhost', token: 't' })
-    const ac = new AbortController()
-    ac.abort()
-
-    const events = []
-    for await (const ev of client.observe(['u-1'], { signal: ac.signal })) {
-      events.push(ev)
-    }
-
-    assert.equal(events.length, 0)
-    assert.equal(mockFetch.mock.calls.length, 0)
-  })
-
-  it('backfill: false (default) does not call /history', async () => {
-    const client = createClient({ endpoint: 'http://localhost', token: 't' })
-    const ac = new AbortController()
-    const sseText =
-      'event: data\ndata: {"type":"record/insert","record-xid":"u-1","ts":"2026-05-24T00:00:01Z","after":{}}\n\n'
-
-    const calls = []
-    mockFetch.mock.mockImplementation(async (url, _opts) => {
-      calls.push(url)
-      if (url === 'http://localhost/data/subscription/set') {
-        return mockResponse(200, { ok: true })
-      }
-      if (url === 'http://localhost/data/events') {
-        const body = sseReader(sseText)
-        const origGetReader = body.getReader.bind(body)
-        body.getReader = () => {
-          const r = origGetReader()
-          const origRead = r.read.bind(r)
-          r.read = async () => {
-            const chunk = await origRead()
-            if (chunk.done) ac.abort()
-            return chunk
-          }
-          return r
-        }
-        return { ok: true, status: 200, body, text: async () => '' }
-      }
-      throw new Error(`unexpected ${url}`)
-    })
-
-    for await (const _ of client.observe(['u-1'], { signal: ac.signal })) { /* drain */ }
-
-    assert.ok(!calls.includes('http://localhost/history'),
-      'should not hit /history when backfill is off')
-  })
-
-  it('backfill: true folds /history rows into channel-shaped events for watched records', async () => {
-    const client = createClient({ endpoint: 'http://localhost', token: 't' })
-    const ac = new AbortController()
-    const sseText =
-      'event: data\ndata: {"type":"record/update","record-xid":"u-1","ts":"2026-05-24T00:00:01Z","before":{"name":"A"},"after":{"name":"B"}}\n\n'
-
-    let historyCallCount = 0
-    mockFetch.mock.mockImplementation(async (url, opts) => {
-      if (url === 'http://localhost/data/subscription/set') {
-        return mockResponse(200, { ok: true })
-      }
-      if (url === 'http://localhost/data/events') {
-        return { ok: true, status: 200, body: sseReader(sseText), text: async () => '' }
-      }
-      if (url === 'http://localhost/history') {
-        historyCallCount++
-        const reqBody = JSON.parse(opts.body)
-        assert.equal(reqBody.op, 'events')
-        assert.equal(reqBody.opts.between[0], '2026-05-24T00:00:01Z')
-        ac.abort()
-        // Attribute-primary rows: two attrs for u-1 update, one row for u-2
-        // (outside the watch set — should be filtered).
-        return mockResponse(200, { op: 'events', result: [
-          { ts: '2026-05-24T00:00:02Z', 'record-xid': 'u-1', op: 'update',
-            'attribute-xid': 'name-xid', value: 'NewName', 'actor-xid': 'a1' },
-          { ts: '2026-05-24T00:00:02Z', 'record-xid': 'u-1', op: 'update',
-            'attribute-xid': 'email-xid', value: 'new@x', 'actor-xid': 'a1' },
-          { ts: '2026-05-24T00:00:04Z', 'record-xid': 'u-2', op: 'delete' },
-        ]})
-      }
-      throw new Error(`unexpected ${url}`)
-    })
-
-    const events = []
-    for await (const ev of client.observe(['u-1'],
-        { signal: ac.signal, backfill: true })) {
-      events.push(ev)
-    }
-
-    assert.equal(historyCallCount, 1)
-    // 1 live + 1 backfill (u-1 update folded across attrs). u-2 is filtered out.
-    assert.equal(events.length, 2, `events: ${JSON.stringify(events, null, 2)}`)
-    // Live event: record-shaped envelope, no fromBackfill flag.
-    assert.equal(events[0].type, 'record/update')
-    assert.equal(events[0]['record-xid'], 'u-1')
-    assert.ok(!events[0].fromBackfill)
-    // Backfill u-1: update folded across two attribute rows. Backfill keeps
-    // attribute-xid keys (history is attribute-primary; the live path has
-    // attribute-key translation, this one does not — `fromBackfill` flags it).
-    assert.equal(events[1].fromBackfill, true)
-    assert.equal(events[1].type, 'record/update')
-    assert.equal(events[1]['record-xid'], 'u-1')
-    assert.deepEqual(events[1].after, { 'name-xid': 'NewName', 'email-xid': 'new@x' })
-    assert.equal(events[1].actor, 'a1')
-  })
-
-  it('backfill: true tolerates HISTORY_UNAVAILABLE silently', async () => {
-    const client = createClient({ endpoint: 'http://localhost', token: 't' })
-    const ac = new AbortController()
-    const sseText =
-      'event: data\ndata: {"type":"record/insert","record-xid":"u-1","ts":"t1","after":{}}\n\n'
-
-    mockFetch.mock.mockImplementation(async (url) => {
-      if (url === 'http://localhost/data/subscription/set') {
-        return mockResponse(200, { ok: true })
-      }
-      if (url === 'http://localhost/data/events') {
-        return { ok: true, status: 200, body: sseReader(sseText), text: async () => '' }
-      }
-      if (url === 'http://localhost/history') {
-        ac.abort()
-        return mockResponse(404, { error: { message: 'No audit provider', code: 'HISTORY_UNAVAILABLE' } })
-      }
-      throw new Error(`unexpected ${url}`)
-    })
-
-    const events = []
-    for await (const ev of client.observe(['u-1'],
-        { signal: ac.signal, backfill: true })) {
-      events.push(ev)
-    }
-
-    // The live event came through; backfill failed silently.
-    assert.equal(events.length, 1)
-    assert.equal(events[0].fromBackfill, undefined)
-  })
-
-  it('two parallel observe()s on one client coexist and each gets only its records', async () => {
-    const client = createClient({ endpoint: 'http://localhost', token: 't' })
-    const ac1 = new AbortController()
-    const ac2 = new AbortController()
-    // Each session yields the same stream; the SDK filters per descriptor.
-    const sseText =
-      'event: data\ndata: {"type":"record/update","record-xid":"u-1","ts":"t1","after":{"x":1}}\n\n' +
-      'event: data\ndata: {"type":"record/update","record-xid":"u-2","ts":"t2","after":{"x":2}}\n\n'
-
-    const bodies = []
-    mockFetch.mock.mockImplementation(async (url, opts) => {
-      if (url === 'http://localhost/data/subscription/set') {
-        bodies.push(JSON.parse(opts.body))
-        return mockResponse(200, { ok: true })
-      }
-      if (url === 'http://localhost/data/events') {
-        const body = sseReader(sseText)
-        const origGetReader = body.getReader.bind(body)
-        body.getReader = () => {
-          const r = origGetReader()
-          const origRead = r.read.bind(r)
-          r.read = async () => {
-            const chunk = await origRead()
-            if (chunk.done) { ac1.abort(); ac2.abort() }
-            return chunk
-          }
-          return r
-        }
-        return { ok: true, status: 200, body, text: async () => '' }
-      }
-      throw new Error(`unexpected ${url}`)
-    })
-
-    const a = []
-    const b = []
-    async function drain(iter, into) { for await (const ev of iter) into.push(ev) }
-    await Promise.all([
-      drain(client.observe(['u-1'], { signal: ac1.signal, key: 'a' }), a),
-      drain(client.observe(['u-2'], { signal: ac2.signal, key: 'b' }), b),
-    ])
-
-    assert.equal(a.length, 1, `a: ${JSON.stringify(a)}`)
-    assert.equal(a[0]['record-xid'], 'u-1')
-    assert.equal(b.length, 1, `b: ${JSON.stringify(b)}`)
-    assert.equal(b[0]['record-xid'], 'u-2')
-
-    // At some point the wire body included both descriptors. The final
-    // body is empty (both observers cleaned up).
-    const everSawBoth = bodies.some(body =>
-      body.subscriptions.length === 2 &&
-      body.subscriptions.every(s => s.type === 'data'))
-    assert.ok(everSawBoth,
-      `expected at least one body with both descriptors: ${JSON.stringify(bodies)}`)
   })
 })
 

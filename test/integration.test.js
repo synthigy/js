@@ -324,7 +324,7 @@ describe('integration', { skip }, () => {
         const rows = await c.search('User', null, {})
         const xids = rows.map(r => r.xid).filter(Boolean).slice(0, 2)
         assert.ok(xids.length > 0, 'need at least one User xid to subscribe to')
-        await c.subscribe(xids)
+        await c._subscribe(xids)
 
         const status = await c.subscriptions()
         assert.ok(Array.isArray(status.subscriptions))
@@ -333,59 +333,59 @@ describe('integration', { skip }, () => {
         assert.ok(xids.every(x => dataItem.records.includes(x)),
           `subscribed xids missing from status: ${JSON.stringify(dataItem)}`)
 
-        await c.unsubscribe(xids)
+        await c._unsubscribe(xids)
         const after = await c.subscriptions()
         assert.ok(!after.subscriptions.some(s => (s.type ?? 'data') === 'data'),
           `data sub should be gone: ${JSON.stringify(after.subscriptions)}`)
       } finally {
-        await c.clearSubscriptions().catch(() => {})
+        await c._clearSubscriptions().catch(() => {})
       }
     })
 
     it('entity track: setSubscriptions registers an entity-level sub', async () => {
       const c = makeClient()
       try {
-        await c.setSubscriptions([{ type: 'entity', entities: ['User'] }])
+        await c._setSubscriptions([{ type: 'entity', entities: ['User'] }])
         const status = await c.subscriptions()
         const ent = status.subscriptions.find(s => s.type === 'entity')
         assert.ok(ent && ent.entities.includes('User'),
           `entity sub not in status: ${JSON.stringify(status.subscriptions)}`)
       } finally {
-        await c.clearSubscriptions().catch(() => {})
+        await c._clearSubscriptions().catch(() => {})
       }
     })
 
     it('relation track: setSubscriptions registers a relation-level sub', async () => {
       const c = makeClient()
       try {
-        await c.setSubscriptions([{ type: 'relation', relations: ['User Group - users'] }])
+        await c._setSubscriptions([{ type: 'relation', relations: ['User Group - users'] }])
         const status = await c.subscriptions()
         const rel = status.subscriptions.find(s => s.type === 'relation')
         assert.ok(rel && rel.relations.length > 0,
           `relation sub not in status: ${JSON.stringify(status.subscriptions)}`)
       } finally {
-        await c.clearSubscriptions().catch(() => {})
+        await c._clearSubscriptions().catch(() => {})
       }
     })
 
     it('setSubscriptions replaces the full set', async () => {
       const c = makeClient()
       try {
-        await c.setSubscriptions([{ type: 'entity', entities: ['User'] }])
-        await c.setSubscriptions([{ type: 'entity', entities: ['User Group'] }])
+        await c._setSubscriptions([{ type: 'entity', entities: ['User'] }])
+        await c._setSubscriptions([{ type: 'entity', entities: ['User Group'] }])
         const status = await c.subscriptions()
         const ent = status.subscriptions.find(s => s.type === 'entity')
         assert.ok(ent && ent.entities.includes('User Group') && !ent.entities.includes('User'),
           `expected only User Group after replace: ${JSON.stringify(status.subscriptions)}`)
       } finally {
-        await c.clearSubscriptions().catch(() => {})
+        await c._clearSubscriptions().catch(() => {})
       }
     })
 
     it('clearSubscriptions empties the session', async () => {
       const c = makeClient()
-      await c.setSubscriptions([{ type: 'entity', entities: ['User'] }])
-      await c.clearSubscriptions()
+      await c._setSubscriptions([{ type: 'entity', entities: ['User'] }])
+      await c._clearSubscriptions()
       const status = await c.subscriptions()
       assert.equal(status.subscriptions.length, 0,
         `expected empty after clear: ${JSON.stringify(status.subscriptions)}`)
@@ -394,7 +394,7 @@ describe('integration', { skip }, () => {
     it('listen connects and can be cancelled via AbortSignal', async () => {
       const c = makeClient()
       try {
-        await c.setSubscriptions([{ type: 'entity', entities: ['User'] }])
+        await c._setSubscriptions([{ type: 'entity', entities: ['User'] }])
 
         const ac = new AbortController()
         setTimeout(() => ac.abort(), 200)
@@ -407,7 +407,7 @@ describe('integration', { skip }, () => {
         // We may or may not have received events — the point is it terminates cleanly
         assert.ok(Array.isArray(events))
       } finally {
-        await c.clearSubscriptions().catch(() => {})
+        await c._clearSubscriptions().catch(() => {})
       }
     })
   })

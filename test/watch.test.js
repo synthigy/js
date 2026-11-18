@@ -237,16 +237,16 @@ describe('CoalesceBuffer — backpressure modes', () => {
 })
 
 // Fake client: the multiplexer consumes client.listen() (async generator) and
-// POSTs client.setSubscriptions(items). We stub both so fusion can be observed
+// POSTs client._setSubscriptions(items). We stub both so fusion can be observed
 // with no network.
 function fakeClient() {
   const calls = []
   let abort
   return {
     calls,
-    async setSubscriptions(items) { calls.push(items) },
+    async _setSubscriptions(items) { calls.push(items) },
     async *listen({ signal }) {
-      yield { type: 'sse/open' }   // handshake — unblocks the mux's first flush
+      yield { type: 'sse/open', stream: 's-test-1' }   // handshake — unblocks the mux's first flush
       await new Promise((res) => {
         if (signal.aborted) return res()
         abort = res
@@ -284,15 +284,469 @@ describe('WatchMultiplexer — fusion (N watches → 1 SSE + 1 consolidated POST
     w.close(); mux.close()
   })
 
-  test('closing the last watch POSTs an empty subscription set', async () => {
+  test('a reconnect posts the same union again (the engine dropped it with the stream)', async () => {
+    const client = fakeClient()
+    client.listen = async function* ({ signal }) {
+      yield { type: 'sse/open', stream: 's-test-1' }
+      while (!client.calls.length) await settle()
+      yield { type: 'sse/open', stream: 's-test-1' }
+      await new Promise((res) => signal.addEventListener('abort', res, { once: true }))
+    }
+    const mux = new WatchMultiplexer(client, { schema: false })
+    const w = new Watch(mux, { records: ['u-1'] })
+    await settle(); await settle()
+    assert.equal(client.calls.length, 2, 'one POST per stream session')
+    assert.deepEqual(client.calls[1], client.calls[0])
+    w.close(); mux.close()
+  })
+
+  test('a reconnect flush waits for the one in flight', async () => {
+    const client = fakeClient()
+    let inflight = 0, most = 0
+    client._setSubscriptions = async (items) => {
+      most = Math.max(most, ++inflight)
+      await new Promise((r) => setTimeout(r, 20))
+      inflight--
+      client.calls.push(items)
+    }
+    client.listen = async function* ({ signal }) {
+      yield { type: 'sse/open', stream: 's-test-1' }
+      yield { type: 'sse/open', stream: 's-test-1' }
+      await new Promise((res) => signal.addEventListener('abort', res, { once: true }))
+    }
+    const mux = new WatchMultiplexer(client, { schema: false })
+    const w1 = new Watch(mux, { records: ['u-1'] })
+    const w2 = new Watch(mux, { records: ['u-2'] })
+    await new Promise((r) => setTimeout(r, 150))
+    assert.equal(most, 1, 'never two subscription POSTs at once')
+    const last = JSON.stringify(client.calls.at(-1))
+    assert.ok(last.includes('u-1') && last.includes('u-2'), `the latest union lands last: ${last}`)
+    w1.close(); w2.close(); mux.close()
+  })
+
+  test('a watch after a refused stream opens a new one', async () => {
+    const client = fakeClient()
+    let streams = 0
+    client.listen = async function* () {
+      streams++
+      throw new SynthigyError('no', 'ENTITY_FORBIDDEN', undefined, { status: 403 })
+    }
+    const mux = new WatchMultiplexer(client, { schema: false })
+    const first = new Watch(mux, { records: ['u-1'] })
+    await settle()
+    const second = new Watch(mux, { records: ['u-2'] })
+    await settle()
+    assert.equal(streams, 2, 'the second watch reopened the stream')
+    first.close(); second.close(); mux.close()
+  })
+
+  test('a watch on every op keeps the op filter off for all', async () => {
     const client = fakeClient()
     const mux = new WatchMultiplexer(client, { schema: false })
+    const w1 = new Watch(mux, { records: ['u-1'], ops: ['insert'] })
+    await settle()
+    assert.deepEqual(client.calls.at(-1)[0].operations, ['insert'])
+    const w2 = new Watch(mux, { records: ['u-2'] })
+    await settle()
+    assert.equal(client.calls.at(-1)[0].operations, undefined, 'u-2 must still get updates and deletes')
+    w1.close(); w2.close(); mux.close()
+  })
+
+  test('a reconnect tells the watch it resumed', async () => {
+    const client = fakeClient()
+    client.listen = async function* ({ signal }) {
+      yield { type: 'sse/open', stream: 's-test-1' }
+      yield { type: 'sse/open', stream: 's-test-1' }
+      await new Promise((res) => signal.addEventListener('abort', res, { once: true }))
+    }
+    const mux = new WatchMultiplexer(client, { schema: false })
+    const w = new Watch(mux, { records: ['u-1'] })
+    const it = w.events[Symbol.asyncIterator]()
+    const first = await Promise.race([it.next(), new Promise((r) => setTimeout(() => r(null), 1000))])
+    assert.equal(first?.value?.type, 'connection/resumed')
+    w.close(); mux.close()
+  })
+
+  test('backfill asks history about each watched record, so a busy gap cannot crowd them out', async () => {
+    const client = fakeClient()
+    let reconnect
+    client.listen = async function* ({ signal }) {
+      yield { type: 'sse/open', stream: 's-1' }
+      yield { type: 'record/update', 'record-xid': 'u-1', ts: '2026-11-18T10:00:00Z', after: { name: 'A' } }
+      await new Promise((r) => { reconnect = r })
+      yield { type: 'sse/open', stream: 's-2' }
+      await new Promise((res) => signal.addEventListener('abort', res, { once: true }))
+    }
+    const noise = Array.from({ length: 1000 }, (_, i) =>
+      ({ 'record-xid': `other-${i}`, op: 'change', ts: '2026-11-18T10:01:00Z', 'attribute-xid': 'name', value: 'x' }))
+    client.history = {
+      events: async ({ recordXid }) => recordXid
+        ? [{ 'record-xid': recordXid, op: 'change', ts: '2026-11-18T10:05:00Z', 'attribute-xid': 'name', value: `${recordXid}!` }]
+        : noise,
+    }
+    const mux = new WatchMultiplexer(client, { schema: false })
+    const w = new Watch(mux, { records: ['u-1', 'u-2'] }, { backfill: true, backpressure: 'lossless' })
+    const it = w.events[Symbol.asyncIterator]()
+    const next = () => Promise.race([it.next(), new Promise((r) => setTimeout(() => r({ value: null }), 1000))])
+    await next()
+    reconnect()
+    const replayed = [(await next()).value, (await next()).value].map((e) => [e?.record, e?.after?.name])
+    assert.deepEqual(replayed.sort(), [['u-1', 'u-1!'], ['u-2', 'u-2!']])
+    w.close(); mux.close()
+  })
+
+  test('backfill replays the gap from history before the resumed sentinel', async () => {
+    const client = fakeClient()
+    let reconnect
+    client.listen = async function* ({ signal }) {
+      yield { type: 'sse/open', stream: 's-test-1' }
+      yield { type: 'record/update', 'record-xid': 'u-1', ts: '2026-11-18T10:00:00Z', after: { name: 'A' } }
+      await new Promise((r) => { reconnect = r })
+      yield { type: 'sse/open', stream: 's-test-1' }
+      await new Promise((res) => signal.addEventListener('abort', res, { once: true }))
+    }
+    let asked
+    client.history = {
+      events: async (q) => {
+        asked = q
+        return [
+          { 'record-xid': 'u-1', op: 'change', ts: '2026-11-18T09:00:00Z', 'attribute-xid': 'name', value: 'old' },
+          { 'record-xid': 'u-1', op: 'change', ts: '2026-11-18T10:05:00Z', 'attribute-xid': 'name', value: 'B' },
+          { 'record-xid': 'r-9', op: 'change', ts: '2026-11-18T10:06:00Z', 'attribute-xid': 'name', value: 'X' },
+        ]
+      },
+    }
+    const mux = new WatchMultiplexer(client, { schema: false })
+    const w = new Watch(mux, { records: ['u-1'] }, { backfill: true, backpressure: 'lossless' })
+    const it = w.events[Symbol.asyncIterator]()
+    const next = () => Promise.race([it.next(), new Promise((r) => setTimeout(() => r({ value: null }), 1000))])
+    assert.equal((await next()).value?.after?.name, 'A')
+    reconnect()
+    const replayed = (await next()).value
+    assert.deepEqual([replayed?.type, replayed?.record, replayed?.after, replayed?.fromBackfill],
+      ['record/update', 'u-1', { name: 'B' }, true])
+    assert.equal(asked.between[0], '2026-11-18T10:00:00Z', 'the gap starts at the last event seen')
+    assert.equal((await next()).value?.type, 'connection/resumed')
+    w.close(); mux.close()
+  })
+
+  test('live events that arrive during a backfill come after the replay and the resumed sentinel', async () => {
+    const client = fakeClient()
+    let reconnect
+    client.listen = async function* ({ signal }) {
+      yield { type: 'sse/open', stream: 's-test-1' }
+      yield { type: 'record/update', 'record-xid': 'u-1', ts: '2026-11-18T10:00:00Z', after: { name: 'A' } }
+      await new Promise((r) => { reconnect = r })
+      yield { type: 'sse/open', stream: 's-test-1' }
+      yield { type: 'record/update', 'record-xid': 'u-1', ts: '2026-11-18T10:10:00Z', after: { name: 'C' } }
+      await new Promise((res) => signal.addEventListener('abort', res, { once: true }))
+    }
+    let release
+    client.history = {
+      events: async () => {
+        await new Promise((r) => { release = r })
+        return [{ 'record-xid': 'u-1', op: 'change', ts: '2026-11-18T10:05:00Z', 'attribute-xid': 'name', value: 'B' }]
+      },
+    }
+    const mux = new WatchMultiplexer(client, { schema: false })
+    const w = new Watch(mux, { records: ['u-1'] }, { backfill: true, backpressure: 'lossless' })
+    const it = w.events[Symbol.asyncIterator]()
+    const next = () => Promise.race([it.next(), new Promise((r) => setTimeout(() => r({ value: null }), 1000))])
+    assert.equal((await next()).value?.after?.name, 'A')
+    reconnect()
+    while (!release) await settle()
+    await settle(); await settle()
+    release()
+    const got = []
+    for (let i = 0; i < 3; i++) { const v = (await next()).value; got.push(v?.type === 'connection/resumed' ? 'resumed' : v?.after?.name) }
+    assert.deepEqual(got, ['B', 'resumed', 'C'])
+    assert.equal((await Promise.race([it.next(), new Promise((r) => setTimeout(() => r({ value: null }), 100))])).value, null, 'nothing duplicated')
+    w.close(); mux.close()
+  })
+
+  test('a failed backfill still delivers the live events held during it, after the sentinel', async () => {
+    const client = fakeClient()
+    let reconnect
+    client.listen = async function* ({ signal }) {
+      yield { type: 'sse/open', stream: 's-test-1' }
+      yield { type: 'record/update', 'record-xid': 'u-1', ts: '2026-11-18T10:00:00Z', after: { name: 'A' } }
+      await new Promise((r) => { reconnect = r })
+      yield { type: 'sse/open', stream: 's-test-1' }
+      yield { type: 'record/update', 'record-xid': 'u-1', ts: '2026-11-18T10:10:00Z', after: { name: 'C' } }
+      await new Promise((res) => signal.addEventListener('abort', res, { once: true }))
+    }
+    let release
+    client.history = {
+      events: async () => { await new Promise((r) => { release = r }); throw new Error('history down') },
+    }
+    const mux = new WatchMultiplexer(client, { schema: false })
+    const w = new Watch(mux, { records: ['u-1'] }, { backfill: true, backpressure: 'lossless' })
+    const it = w.events[Symbol.asyncIterator]()
+    const next = () => Promise.race([it.next(), new Promise((r) => setTimeout(() => r({ value: null }), 1000))])
+    assert.equal((await next()).value?.after?.name, 'A')
+    reconnect()
+    while (!release) await settle()
+    await settle(); await settle()
+    release()
+    assert.equal((await next()).value?.type, 'connection/resumed')
+    assert.equal((await next()).value?.after?.name, 'C')
+    w.close(); mux.close()
+  })
+
+  test('every subscription POST names the stream it is for', async () => {
+    const client = fakeClient()
+    const streams = []
+    client._setSubscriptions = async (_items, opts) => { streams.push(opts?.stream) }
+    client.listen = async function* ({ signal }) {
+      yield { type: 'sse/open', stream: 's-first' }
+      while (!streams.length) await settle()
+      yield { type: 'sse/open', stream: 's-second' }
+      await new Promise((res) => signal.addEventListener('abort', res, { once: true }))
+    }
+    const mux = new WatchMultiplexer(client, { schema: false })
+    const w = new Watch(mux, { records: ['u-1'] })
+    await settle(); await settle()
+    assert.deepEqual(streams, ['s-first', 's-second'])
+    w.close(); mux.close()
+  })
+
+  test('with keepAlive, closing the last watch POSTs an empty subscription set', async () => {
+    const client = fakeClient()
+    const mux = new WatchMultiplexer(client, { schema: false, keepAlive: true })
     const w = new Watch(mux, { records: ['u-1'] })
     await settle()
     w.close()
     await settle()
     assert.deepEqual(client.calls.at(-1), [], 'server told to drop everything we held')
     mux.close()
+  })
+
+  test('without keepAlive, closing the last watch closes the stream instead of posting', async () => {
+    const client = fakeClient()
+    const mux = new WatchMultiplexer(client, { schema: false })
+    const w = new Watch(mux, { records: ['u-1'] })
+    await settle()
+    const before = client.calls.length
+    w.close()
+    await settle()
+    assert.equal(client.calls.length, before, 'the engine drops a stream\'s set when the stream closes')
+    mux.close()
+  })
+
+  test('a watch opened after the stream closed waits for the new stream before posting', async () => {
+    const client = fakeClient()
+    let n = 0
+    const streams = []
+    client._setSubscriptions = async (_items, opts) => { streams.push(opts?.stream) }
+    client.listen = async function* ({ signal }) {
+      yield { type: 'sse/open', stream: `s-${++n}` }
+      await new Promise((res) => signal.addEventListener('abort', res, { once: true }))
+    }
+    const mux = new WatchMultiplexer(client, { schema: false })
+    const first = new Watch(mux, { records: ['u-1'] })
+    await settle()
+    first.close()
+    await settle()
+    const second = new Watch(mux, { records: ['u-2'] })
+    await settle(); await settle()
+    assert.deepEqual(streams, ['s-1', 's-2'], 'no POST went out with the closed stream\'s id')
+    second.close(); mux.close()
+  })
+
+  test('a dead stream refusing an old POST leaves the new stream in charge', async () => {
+    const client = fakeClient()
+    const posts = []
+    let reconnect, release
+    client._setSubscriptions = async (items, opts) => {
+      posts.push(opts?.stream)
+      if (opts?.stream === 's-old' && posts.length > 1) {
+        await new Promise((r) => { release = r })
+        throw new SynthigyError('gone', 'STREAM_NOT_FOUND', undefined, { status: 400 })
+      }
+    }
+    client.listen = async function* ({ signal }) {
+      yield { type: 'sse/open', stream: 's-old' }
+      await new Promise((r) => { reconnect = r })
+      yield { type: 'sse/open', stream: 's-new' }
+      await new Promise((res) => signal.addEventListener('abort', res, { once: true }))
+    }
+    const mux = new WatchMultiplexer(client, { schema: false })
+    const w = new Watch(mux, { records: ['u-1'] })
+    await settle()
+    w.add(['u-2'])
+    await settle()
+    reconnect()
+    await settle()
+    release()
+    await settle(); await settle()
+    assert.equal(mux._streamId, 's-new', 'the old refusal did not clear the new id')
+    assert.equal(posts.at(-1), 's-new', 'the union went to the new stream')
+    w.close(); mux.close()
+  })
+
+  test('a union that could not be posted is posted on the next stream', async () => {
+    const client = fakeClient()
+    const posts = []
+    let reconnect
+    client._setSubscriptions = async (items, opts) => {
+      posts.push([opts?.stream, JSON.stringify(items)])
+      if (opts?.stream === 's-1' && posts.length > 1) throw new SynthigyError('gone', 'STREAM_NOT_FOUND', undefined, { status: 400 })
+    }
+    client.listen = async function* ({ signal }) {
+      yield { type: 'sse/open', stream: 's-1' }
+      await new Promise((r) => { reconnect = r })
+      yield { type: 'sse/open', stream: 's-2' }
+      await new Promise((res) => signal.addEventListener('abort', res, { once: true }))
+    }
+    const mux = new WatchMultiplexer(client, { schema: false })
+    const w = new Watch(mux, { records: ['u-1'] })
+    await settle()
+    w.add(['u-2'])
+    await settle()
+    w.add(['u-3'])
+    await settle()
+    const w2 = new Watch(mux, { records: ['u-3'] })
+    let early = false
+    w2.subscribed().then(() => { early = true })
+    await settle(); await settle()
+    assert.equal(early, false, 'nothing reached the engine yet, so the new watch is not subscribed')
+    reconnect()
+    await settle(); await settle()
+    assert.equal(early, true, 'the new stream\'s POST covers it')
+    w2.close()
+    const last = posts.at(-1)
+    assert.equal(last[0], 's-2')
+    assert.ok(last[1].includes('u-2') && last[1].includes('u-3'), `the whole union reached the new stream: ${last[1]}`)
+    w.close(); mux.close()
+  })
+
+  test('after a session ends, a covered new watch waits for the next open', async () => {
+    const client = fakeClient()
+    const posts = []
+    let end, reconnect
+    client._setSubscriptions = async (items, opts) => { posts.push(opts?.stream) }
+    client.listen = async function* ({ signal }) {
+      yield { type: 'sse/open', stream: 's-1' }
+      await new Promise((r) => { end = r })
+      yield { type: 'sse/close', stream: 's-1' }
+      await new Promise((r) => { reconnect = r })
+      yield { type: 'sse/open', stream: 's-2' }
+      await new Promise((res) => signal.addEventListener('abort', res, { once: true }))
+    }
+    const mux = new WatchMultiplexer(client, { schema: false })
+    const seen = []
+    const w = new Watch(mux, { records: ['u-1'] })
+    ;(async () => { for await (const ev of w.events) seen.push(ev.type) })()
+    await settle()
+    end()
+    await settle()
+    assert.equal(mux._streamId, null, 'the ended stream id is dropped')
+    const w2 = new Watch(mux, { records: ['u-1'] })
+    let early = false
+    w2.subscribed().then(() => { early = true })
+    await settle(); await settle()
+    assert.equal(early, false, 'the engine holds nothing for the ended stream')
+    reconnect()
+    await settle(); await settle()
+    assert.equal(early, true, 'the next open\'s POST covers it')
+    assert.deepEqual(posts, ['s-1', 's-2'])
+    assert.ok(!seen.some((t) => t.startsWith('sse/')), `no close sentinel reaches watches: ${seen}`)
+    w2.close(); w.close(); mux.close()
+  })
+
+  test('a stale close for an older stream keeps the current id', async () => {
+    const client = fakeClient()
+    client.listen = async function* ({ signal }) {
+      yield { type: 'sse/open', stream: 's-2' }
+      yield { type: 'sse/close', stream: 's-1' }
+      await new Promise((res) => signal.addEventListener('abort', res, { once: true }))
+    }
+    const mux = new WatchMultiplexer(client, { schema: false })
+    const w = new Watch(mux, { records: ['u-1'] })
+    await settle(); await settle()
+    assert.equal(mux._streamId, 's-2')
+    assert.notEqual(mux._lastUnion, null, 'the posted union is still recorded')
+    w.close(); mux.close()
+  })
+
+  test('a POST that outlives its stream subscribes nothing until the next open', async () => {
+    const client = fakeClient()
+    let releasePost, endSession, reopen
+    let posts = 0
+    client._setSubscriptions = async () => {
+      if (++posts === 1) await new Promise((r) => { releasePost = r })
+    }
+    client.listen = async function* ({ signal }) {
+      yield { type: 'sse/open', stream: 's-1' }
+      await new Promise((r) => { endSession = r })
+      yield { type: 'sse/close', stream: 's-1' }
+      await new Promise((r) => { reopen = r })
+      yield { type: 'sse/open', stream: 's-2' }
+      await new Promise((res) => signal.addEventListener('abort', res, { once: true }))
+    }
+    const mux = new WatchMultiplexer(client, { schema: false })
+    const w = new Watch(mux, { records: ['u-1'] })
+    let subscribed = false
+    w.subscribed().then(() => { subscribed = true })
+    await settle()
+    endSession()
+    await settle()
+    releasePost()
+    await settle()
+    assert.equal(subscribed, false, 'the engine dropped s-1 with its set')
+    reopen()
+    await settle(); await settle()
+    assert.equal(subscribed, true, "s-2's POST subscribes it")
+    w.close(); mux.close()
+  })
+
+  test('a stream the engine no longer has is not reported as a rejected subscription', async () => {
+    const client = fakeClient()
+    let calls = 0
+    client._setSubscriptions = async () => {
+      if (++calls === 2) throw new SynthigyError('gone', 'STREAM_NOT_FOUND', undefined, { status: 400 })
+    }
+    const mux = new WatchMultiplexer(client, { schema: false })
+    const w = new Watch(mux, { records: ['u-1'] })
+    const seen = []
+    ;(async () => { for await (const ev of w.events) seen.push(ev.type) })()
+    await settle()
+    w.add(['u-2'])
+    await settle(); await settle()
+    assert.ok(!seen.includes('subscription/rejected'), `no false rejection: ${seen}`)
+    assert.equal(mux._streamId, null, 'the dead id is dropped until the next sse/open')
+    w.close(); mux.close()
+  })
+
+  test('a union equal to the last posted one does not subscribe a watch while no stream is open', async () => {
+    const client = fakeClient()
+    let reconnect
+    let calls = 0
+    client._setSubscriptions = async () => {
+      if (++calls === 2) throw new SynthigyError('gone', 'STREAM_NOT_FOUND', undefined, { status: 400 })
+    }
+    client.listen = async function* ({ signal }) {
+      yield { type: 'sse/open', stream: 's-1' }
+      await new Promise((r) => { reconnect = r })
+      yield { type: 'sse/open', stream: 's-2' }
+      await new Promise((res) => signal.addEventListener('abort', res, { once: true }))
+    }
+    const mux = new WatchMultiplexer(client, { schema: false })
+    const w = new Watch(mux, { records: ['u-1'] })
+    await settle()
+    w.add(['u-2'])
+    await settle()
+    assert.equal(mux._streamId, null)
+    w.remove(['u-2'])
+    const w2 = new Watch(mux, { records: ['u-1'] })
+    let early = false
+    w2.subscribed().then(() => { early = true })
+    await settle(); await settle()
+    assert.equal(early, false, 'the engine holds nothing for the new watch')
+    reconnect()
+    await settle(); await settle()
+    assert.equal(early, true, 'the next stream\'s POST covers it')
+    w2.close(); w.close(); mux.close()
   })
 })
 
@@ -331,12 +785,45 @@ describe('QueryWatch refresh triggers', () => {
     const w = watchQuery.xsql(client, '@search list\nproject\n  name', {}, { entity: 'project', op: 'search' })
     await w.ready()
     assert.equal(runs, 2, 'snapshot, then one refetch once the subscription holds')
-    for (const type of ['record/update', 'entity/touched', 'relation/link']) {
+    for (const type of ['record/update', 'entity/touched', 'relation/link', 'connection/resumed']) {
       const before = runs
       queue.push({ type, record: 'A' }); wake?.()
       for (let t = Date.now(); runs === before && Date.now() - t < 2000;) await new Promise((r) => setTimeout(r, 20))
       assert.equal(runs, before + 1, `${type} refreshes`)
     }
+    w.close()
+  })
+})
+
+describe('SqlTemplateWatch refresh triggers', () => {
+  test('entity pokes and a reconnect re-run the SQL, and the sentinel passes through', async () => {
+    const { watchSqlTemplate } = await import('../src/watch-query.js')
+    const queue = []
+    let wake
+    const events = {
+      async *[Symbol.asyncIterator]() {
+        for (;;) {
+          while (queue.length) yield queue.shift()
+          await new Promise((r) => { wake = r })
+        }
+      },
+    }
+    let runs = 0
+    const client = {
+      sqlTemplate: async () => { runs++; return [{ n: runs }] },
+      watch: () => ({ events, close() {}, subscribed: async () => {}, interest: {}, setInterest() {} }),
+    }
+    const w = watchSqlTemplate(client, 'SELECT 1', {}, { entities: ['Movie'] })
+    await w.ready()
+    const passed = []
+    ;(async () => { for await (const ev of w.events) passed.push(ev.type) })()
+    for (const type of ['entity/touched', 'connection/resumed']) {
+      const before = runs
+      queue.push({ type, entity: 'Movie' }); wake?.()
+      for (let t = Date.now(); runs === before && Date.now() - t < 2000;) await new Promise((r) => setTimeout(r, 20))
+      assert.equal(runs, before + 1, `${type} refreshes`)
+    }
+    assert.ok(passed.includes('connection/resumed'), `sentinel passes through: ${passed}`)
     w.close()
   })
 })
@@ -388,7 +875,7 @@ describe('subscription/rejected carries the error', () => {
 
   test('a refused subscribe', async () => {
     const client = fakeClient()
-    client.setSubscriptions = async () => { throw refusal() }
+    client._setSubscriptions = async () => { throw refusal() }
     const mux = new WatchMultiplexer(client, { schema: false })
     const w = new Watch(mux, { records: ['u-1'] })
     assertCarries(await nextRejected(w.events[Symbol.asyncIterator]()))

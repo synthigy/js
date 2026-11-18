@@ -3,6 +3,57 @@
 All notable changes to `@synthigy/sdk`. Follows [semver](https://semver.org).
 Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.5.0
+
+### Breaking
+- **`observe()` is gone; use `watch()`.** It opened its own event stream and posted its own subscription
+  set, and the engine keeps one set per client, so it overwrote the set every watch shared. For the same
+  loop: `for await (const ev of client.watch({ records }).events)`. Its `backfill` lives on as a `watch`
+  option.
+- **`subscribe`, `unsubscribe`, `subscribeModel`, `unsubscribeModel`, `setSubscriptions` and
+  `clearSubscriptions` are internal.** Each replaced the client's whole subscription set behind the watch
+  multiplexer's back. Declare interest with `watch()`; `subscriptions()` still shows what the engine holds.
+
+### Added
+- **Each event stream has its own subscription set** (engine 0.5.5+). Every connection gets a fresh stream id
+  (`/data/events?stream=…`) and each subscription POST names it, so two processes or tabs on one client id no
+  longer overwrite each other's watches. An older engine ignores the id and keeps one set per client.
+- **`watch(interest, { backfill: true })`** replays the record events missed during a reconnect from `/history`
+  (asked per watched record, marked `fromBackfill`), then emits `connection/resumed`.
+- **A busy engine is retried for you.** `SERVER_BUSY` (HTTP 503 from an overloaded engine) is resent up to
+  3 attempts in all, waiting `Retry-After` (at most 10 s) with ±50% jitter, never past the client's `timeout`. The request never
+  ran, so this is safe for writes too. When all 3 are refused you get the error: category `rate_limit`, retryable.
+
+### Fixed
+- **A subscription POST that outlives its stream no longer marks watches subscribed.** The engine drops a closed
+  stream's set, so the watches wait for the next connection's POST.
+- **A watch registered while the event stream reconnects waits for the new stream.** It was marked subscribed
+  against the stream that had just ended, where the engine holds nothing. `listen()` now also yields
+  `{ type: 'sse/close', stream }` when a connection ends, before it reconnects.
+- **`connection/resumed` now fires on every reconnect.** The event stream reconnects inside `listen()`, so the
+  sentinel only fired when the stream ended for good. **Live queries re-run on it**, so a dropped connection no
+  longer leaves a live query stale until the next change.
+- **A watch on every operation is no longer narrowed by another watch's op filter.** The shared subscription
+  sent the union of every watch's ops, so one watch filtered to `insert` stopped updates and deletes for watches
+  that wanted all of them. Any watch with records and no op filter now turns the filter off.
+- **Any 403 on the event stream stops `listen()`/`observe()`** instead of reconnecting forever, matching the other
+  SDKs. **A watch after a refused stream opens a new one**, and the subscription POST on reconnect now waits for
+  the one in flight, so an older set of subscriptions can't land last.
+- **45 engine error codes now carry their real category** instead of `internal`: bad shapes, `INVALID_*` and
+  missing arguments are `validation`; `REF_NOT_FOUND`, `UNKNOWN_ATTRIBUTE`, `UNKNOWN_ROLE` and `DOC_NOT_FOUND` are
+  `not_found`; `GUARD_VIOLATION`, `CONSTRAINT_VIOLATION`, `DEPENDENT_OBJECTS`, `HOOK_REFUSED`, `LOCKED` and
+  `SCHEMA_CONFLICT` are `conflict`; `DB_UNAVAILABLE` is `internal` and retryable. `DB_ERROR` stays unclassified
+  and not retryable; the engine's own `retryable` flag still wins.
+- Watches keep receiving events after the event stream reconnects. The engine
+  drops an identity's subscriptions when its stream closes, and the multiplexer
+  did not send the unchanged set again, so every `watch`, `watchQuery` and
+  `watchSqlTemplate` went quiet after the first reconnect.
+- A backfilling watch holds the live events that arrive while it replays the gap and delivers them after the replayed ones and `connection/resumed` (also when the replay fails), so an older replayed event can't land after a newer live one.
+- `watchSqlTemplate` re-runs its SQL on `connection/resumed`, as `watchQuery` does.
+- A watch opened while the event stream is down no longer resolves `subscribed()` early when its interest is already in the last posted set; it waits for the next stream's POST.
+- A `/data` call resent after `SERVER_BUSY` gets only what is left of the client `timeout`, so the whole call stays within it instead of running to about twice it.
+- `listen()` docs point at `watch()` instead of the now-internal `subscribe()`.
+
 ## 0.4.0
 
 ### Added

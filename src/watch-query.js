@@ -230,6 +230,7 @@ export class QueryWatch {
         } else {
           // sentinels pass through to the QueryWatch consumer
           this._buf.push(ev)
+          if (ev.type === 'connection/resumed') this._scheduleRefresh(ev)
         }
       }
     } catch (e) {
@@ -458,6 +459,7 @@ export class SqlTemplateWatch {
           this._scheduleRefresh(ev)
         } else {
           this._buf.push(ev)
+          if (ev.type === 'connection/resumed') this._scheduleRefresh(ev)
         }
       }
     } catch (e) {
