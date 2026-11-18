@@ -410,7 +410,10 @@ describe('error handling', () => {
       return new Promise((_res, rej) => opts.signal.addEventListener('abort', () => rej(opts.signal.reason), { once: true }))
     })
     const started = Date.now()
-    await assert.rejects(() => client.search('movie', {}, { title: null }))
+    const alive = setTimeout(() => {}, 5000) // AbortSignal.timeout does not hold the event loop open on Node 20
+    try {
+      await assert.rejects(() => client.search('movie', {}, { title: null }))
+    } finally { clearTimeout(alive) }
     const took = Date.now() - started
     assert.equal(calls, 2)
     assert.ok(took < 550, `the whole call stays near the 400 ms timeout, took ${took} ms`)
