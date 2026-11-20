@@ -68,6 +68,29 @@ describe('codegen', () => {
     const sel = ops.slice(ops.indexOf('export const MovieListSel'), ops.indexOf('} as const'))
     assert.doesNotMatch(sel, /votes|rating/)
   })
+
+  it('types @purge as rows and @slice as a relation → boolean map', () => {
+    const ops = generate()
+    assert.match(ops, /stale\(params: MovieStaleParams, opts\?: ExecOpts\): Promise<MovieStale\[\]>/)
+    assert.match(ops, /export type MovieUncast = Record<string, boolean>\n/)
+    assert.doesNotMatch(ops, /MovieUncastSel/)
+    assert.match(ops, /uncast\(params: MovieUncastParams, opts\?: ExecOpts\): Promise<MovieUncast> \{\n    return _client\.query<MovieUncast>\(`@slice uncast\n/)
+    assert.match(ops, /"uncast": MovieUncast \| SynthigyError\n  "stale": MovieStale\[\] \| SynthigyError/)
+  })
+
+  it('a null @slice result decodes as an empty map, alone and in a @batch', async () => {
+    const gen = await importGenerated()
+    const { disconnect } = await import('../src/index.js')
+    const results = [[{ ok: true, data: null }], [{ ok: true, data: null }, { ok: true, data: null }]]
+    gen.configure({ endpoint: 'http://localhost', token: 't',
+      fetch: async () => new Response(JSON.stringify({ results: results.shift() })) })
+    try {
+      assert.deepEqual(await gen.Movie.uncast({ xid: 'x' }), {})
+      assert.deepEqual(await gen.cleanup({ xid: 'x', before: 1990 }), { uncast: {}, stale: [] })
+    } finally {
+      disconnect()
+    }
+  })
 })
 
 describe('warnStaleSchema', () => {

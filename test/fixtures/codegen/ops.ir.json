@@ -1,5 +1,5 @@
 {
-  "sourceHash": "4d9ccd00584666a9aaa21cb0f76cdf751957956b1c891a61c6ddcc021562ac95",
+  "sourceHash": "e8f5a4711f96f0dcb9dd66be2119a61eed7f0f9c4f7f0bfc647ac1a6195c7ae8",
   "operations": [
     {
       "name": "list",
@@ -273,6 +273,66 @@
       "members": [
         "list",
         "stats"
+      ]
+    },
+    {
+      "name": "uncast",
+      "op": "slice",
+      "entity": "movie",
+      "params": [
+        {
+          "name": "xid",
+          "type": "string",
+          "array": false
+        }
+      ],
+      "source": "movie (xid = ?xid:string)\n  ->actors",
+      "result": {
+        "kind": "object",
+        "fields": [
+          {
+            "key": "actors",
+            "kind": "relation",
+            "cardinality": "many",
+            "optional": true,
+            "fields": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "stale",
+      "op": "purge",
+      "entity": "movie",
+      "params": [
+        {
+          "name": "before",
+          "type": "int",
+          "array": false
+        }
+      ],
+      "source": "movie (release_year < ?before:int)\n  xid\n  title",
+      "result": {
+        "kind": "object",
+        "fields": [
+          {
+            "key": "xid",
+            "type": "string",
+            "nullable": false
+          },
+          {
+            "key": "title",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "name": "cleanup",
+      "batch": true,
+      "members": [
+        "uncast",
+        "stale"
       ]
     }
   ]

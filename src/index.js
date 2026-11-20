@@ -1365,12 +1365,12 @@ class SynthigyClient {
    *
    * `op` defaults to `"search"`. Pass `{ op: "get" }` for unique-key
    * identity reads; the XSQL `xid = ?xid:string` form lifts cleanly.
-   * Other read-shape ops (`slice`, `purge`) work too.
+   * Other read-shape ops (`slice`, `purge`, `claim`) work too.
    *
    * @param {string} xsql - XSQL source string
    * @param {Object} [params] - `{name: value}` map for `?name:type[]` refs
    * @param {Object} [opts] - Options
-   * @param {'search'|'get'|'slice'|'purge'} [opts.op='search'] - Document
+   * @param {'search'|'get'|'slice'|'purge'|'claim'} [opts.op='search'] - Document
    *        verb for bare-body sources (and the unwrap: `get` → one record)
    * @param {string} [opts.actingAs] - Per-call impersonation
    * @param {'kebab'|'snake'|'camel'} [opts.keyFormat] - Response key case
@@ -1407,8 +1407,8 @@ class SynthigyClient {
     if (params !== undefined) op.params = params
     const [result] = await this.exec([op], opts)
     if (!result.ok) throw _errorFromServer(result.error, undefined, result._requestId)
-    // `get` returns a single record or null; everything else returns an array.
-    return (verb === 'get') ? result.data : (result.data ?? [])
+    // `get` returns a single record or null, `slice` a relation → boolean map; everything else an array.
+    return (verb === 'get') ? result.data : (verb === 'slice') ? (result.data ?? {}) : (result.data ?? [])
   }
 
   /**
@@ -1591,6 +1591,51 @@ class SynthigyClient {
     const [result] = await this.exec([
       { op: 'purge', entity, args, selections: normalizeSelection(selection) },
     ], opts)
+    if (!result.ok) throw _errorFromServer(result.error, undefined, result._requestId)
+    return result.data
+  }
+
+  /**
+   * Lock up to `args._limit` free records matching `args` to the caller and return them.
+   *
+   * @param {string} entity - Entity name (needs a Lock attribute)
+   * @param {Object} args - Filter; `_limit` is required
+   * @param {Object} [selection] - Fields to return for each claimed record
+   * @param {Object} [opts] - Options ({ actingAs })
+   * @returns {Promise<Object[]>} Claimed records
+   */
+  async claim(entity, args, selection, opts) {
+    const [result] = await this.exec([
+      { op: 'claim', entity, args, selections: normalizeSelection(selection) },
+    ], opts)
+    if (!result.ok) throw _errorFromServer(result.error, undefined, result._requestId)
+    return result.data
+  }
+
+  /**
+   * Extend the lease on records the caller holds; a record missing from the result is no longer held.
+   *
+   * @param {string} entity - Entity name
+   * @param {string[]} xids - Records to keep
+   * @param {Object} [selection] - Fields to return (default xid)
+   * @param {Object} [opts] - Options ({ actingAs })
+   * @returns {Promise<Object[]>} Records still held
+   */
+  async renew(entity, xids, selection, opts) {
+    if (!xids?.length) return []
+    return this.claim(entity, { xid: { _in: xids }, _limit: xids.length }, selection ?? ['xid'], opts)
+  }
+
+  /**
+   * Clear the caller's locks on records named by a list of xids or a unique-key map.
+   *
+   * @param {string} entity - Entity name
+   * @param {string[]|Object} data - xids, or a unique-key map
+   * @param {Object} [opts] - Options ({ actingAs })
+   * @returns {Promise<number>} Records released
+   */
+  async release(entity, data, opts) {
+    const [result] = await this.exec([{ op: 'release', entity, data }], opts)
     if (!result.ok) throw _errorFromServer(result.error, undefined, result._requestId)
     return result.data
   }
@@ -1961,7 +2006,7 @@ class SynthigyClient {
    * @param {string} source - XSQL source
    * @param {Object} [opts]
    * @param {string} [opts.entity] - Root entity (kebab-case)
-   * @param {'search'|'get'|'slice'|'purge'} [opts.op='search']
+   * @param {'search'|'get'|'slice'|'purge'|'claim'} [opts.op='search']
    * @returns {Promise<Array<{severity: string, message: string, from: number, to: number, start: {line: number, col: number}, end: {line: number, col: number}}>>}
    *
    * @example
@@ -2001,7 +2046,7 @@ class SynthigyClient {
    * @param {string} source - XSQL source (bare body or full `@verb` document)
    * @param {Object} [opts]
    * @param {Object} [opts.params] - `?name:type` bindings
-   * @param {'search'|'get'|'slice'|'purge'} [opts.op='search'] - verb for a bare body
+   * @param {'search'|'get'|'slice'|'purge'|'claim'} [opts.op='search'] - verb for a bare body
    * @returns {Promise<Object>} the wire op `{op, entity, args, selections}`
    *
    * @example
@@ -2836,6 +2881,8 @@ export const op = {
   slice:       (entity, args, selection) => ({ op: 'slice',       entity, args, selections: normalizeSelection(selection) }),
   delete:      (entity, data)            => ({ op: 'delete',      entity, data }),
   purge:       (entity, args, selection) => ({ op: 'purge',       entity, args, selections: normalizeSelection(selection) }),
+  claim:       (entity, args, selection) => ({ op: 'claim',       entity, args, selections: normalizeSelection(selection) }),
+  release:     (entity, data)            => ({ op: 'release',     entity, data }),
   searchTree:  (entity, on, args, sel)   => ({ op: 'search-tree', entity, on, args, selections: normalizeSelection(sel) }),
   getTree:     (entity, root, on, sel)   => ({ op: 'get-tree',    entity, root, on, selections: normalizeSelection(sel) }),
   sqlTemplate: (template, params)        => ({ op: 'sql-template', template, params: params || [] }),
@@ -2954,6 +3001,9 @@ export const sync        = (...a) => _dflt().sync(...a)
 export const stack       = (...a) => _dflt().stack(...a)
 export const slice       = (...a) => _dflt().slice(...a)
 export const purge       = (...a) => _dflt().purge(...a)
+export const claim       = (...a) => _dflt().claim(...a)
+export const renew       = (...a) => _dflt().renew(...a)
+export const release     = (...a) => _dflt().release(...a)
 export const sqlTemplate = (...a) => _dflt().sqlTemplate(...a)
 export const query       = (...a) => _dflt().query(...a)
 export const searchTree  = (...a) => _dflt().searchTree(...a)

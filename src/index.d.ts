@@ -843,6 +843,13 @@ export class SynthigyClient {
     opts: ExecOpts & { op: 'get'; entity?: string },
   ): Promise<T | null>
 
+  /** Run an XSQL query in `slice` mode; returns relation-name → boolean. */
+  query<T = Record<string, boolean>>(
+    xsql: string,
+    params: Record<string, unknown> | undefined,
+    opts: ExecOpts & { op: 'slice'; entity?: string },
+  ): Promise<T>
+
   /**
    * Run an XSQL selection-DSL query with optional named parameters.
    * The wire envelope carries the XSQL string in `selections` plus a
@@ -853,7 +860,7 @@ export class SynthigyClient {
     xsql: string,
     params?: Record<string, unknown>,
     opts?: ExecOpts & {
-      op?: 'search' | 'slice' | 'purge'
+      op?: 'search' | 'purge' | 'claim'
       entity?: string
     },
   ): Promise<T[]>
@@ -930,6 +937,29 @@ export class SynthigyClient {
     opts?: ExecOpts,
   ): Promise<T>
 
+  /** Lock up to `args._limit` free matching records to the caller; records it already holds match too and get a new lease. */
+  claim<T = Record<string, unknown>>(
+    entity: string,
+    args: Args & { _limit: number },
+    selection?: Selection,
+    opts?: ExecOpts,
+  ): Promise<T[]>
+
+  /** Extend the lease on held records; a record missing from the result is no longer held. */
+  renew<T = Record<string, unknown>>(
+    entity: string,
+    xids: string[],
+    selection?: Selection,
+    opts?: ExecOpts,
+  ): Promise<T[]>
+
+  /** Clear the caller's locks; returns how many records were released. */
+  release(
+    entity: string,
+    data: string[] | Record<string, unknown>,
+    opts?: ExecOpts,
+  ): Promise<number>
+
   // ── Subscriptions ─────────────────────────────────────────────────────────
 
   /** The subscription set the engine holds for this client (set by its watches). */
@@ -989,7 +1019,7 @@ export class SynthigyClient {
    */
   lint(source: string, opts?: {
     entity?: string
-    op?: 'search' | 'get' | 'slice' | 'purge'
+    op?: 'search' | 'get' | 'slice' | 'purge' | 'claim'
   }): Promise<LintDiagnostic[]>
 
   /**
@@ -1000,7 +1030,7 @@ export class SynthigyClient {
    */
   compile(source: string, opts?: {
     params?: Record<string, unknown>
-    op?: 'search' | 'get' | 'slice' | 'purge'
+    op?: 'search' | 'get' | 'slice' | 'purge' | 'claim'
   }): Promise<Operation>
 
   /**
@@ -1162,7 +1192,7 @@ export interface XsqlWatchOpts extends WatchOpts {
   entity: string
   searchOpts?: ExecOpts
   /** Op override for the underlying client.query() call (default 'search'). */
-  op?: 'search' | 'get' | 'slice' | 'purge'
+  op?: 'search' | 'get' | 'slice' | 'purge' | 'claim'
 }
 
 export interface WatchQueryFn {
@@ -1365,6 +1395,8 @@ export const op: {
   slice(entity: string, args: Record<string, unknown>, selection?: Selection): Operation
   delete(entity: string, data: Record<string, unknown>): Operation
   purge(entity: string, args: Args | undefined, selection?: Selection): Operation
+  claim(entity: string, args: Args & { _limit: number }, selection?: Selection): Operation
+  release(entity: string, data: string[] | Record<string, unknown>): Operation
   searchTree(entity: string, on: string, args: Args | undefined, selection: Selection): Operation
   getTree(entity: string, root: string, on: string, selection: Selection): Operation
   sqlTemplate(template: string, params?: Record<string, unknown> | unknown[], opts?: { cached?: boolean }): Operation
@@ -1438,6 +1470,9 @@ export const sync: SynthigyClient['sync']
 export const stack: SynthigyClient['stack']
 export const slice: SynthigyClient['slice']
 export const purge: SynthigyClient['purge']
+export const claim: SynthigyClient['claim']
+export const renew: SynthigyClient['renew']
+export const release: SynthigyClient['release']
 export const sqlTemplate: SynthigyClient['sqlTemplate']
 export const query: SynthigyClient['query']
 export const searchTree: SynthigyClient['searchTree']

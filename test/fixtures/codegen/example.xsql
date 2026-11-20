@@ -59,3 +59,14 @@ SELECT m.n          AS total_movies,
 FROM m, r, ma
 
 @batch overview: list stats
+
+@slice uncast
+movie (xid = ?xid:string)
+  ->actors
+
+@purge stale
+movie (release_year < ?before:int)
+  xid
+  title
+
+@batch cleanup: uncast stale

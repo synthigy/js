@@ -1189,6 +1189,62 @@ describe('write ops', () => {
 
     await client.purge('User', { active: eq(false) }, { xid: null, name: null })
   })
+
+  it('claim sends claim op with args, selection and actingAs', async () => {
+    const client = createClient({ endpoint: 'http://localhost', token: 't' })
+
+    mockFetch.mock.mockImplementation(async (url, opts) => {
+      const body = JSON.parse(opts.body)
+      assert.equal(body.acting_as, 'u-1')
+      assert.equal(body.key_format, 'camel')
+      assert.deepEqual(body.operations[0], {
+        op: 'claim', entity: 'Job', args: { status: { _eq: 'open' }, _limit: 2 }, selections: { xid: null },
+      })
+      return mockResponse(200, { results: [{ data: [{ xid: 'j-1' }], ok: true }] })
+    })
+
+    const rows = await client.claim('Job', { status: eq('open'), _limit: 2 }, ['xid'], { actingAs: 'u-1', keyFormat: 'camel' })
+    assert.deepEqual(rows, [{ xid: 'j-1' }])
+  })
+
+  it('renew re-claims the given xids, and skips the call for none', async () => {
+    const client = createClient({ endpoint: 'http://localhost', token: 't' })
+
+    mockFetch.mock.mockImplementation(async (url, opts) => {
+      const body = JSON.parse(opts.body)
+      assert.equal(body.acting_as, 'u-1')
+      assert.deepEqual(body.operations[0], {
+        op: 'claim', entity: 'Job', args: { xid: { _in: ['j-1', 'j-2'] }, _limit: 2 }, selections: { xid: null },
+      })
+      return mockResponse(200, { results: [{ data: [{ xid: 'j-1' }], ok: true }] })
+    })
+
+    assert.deepEqual(await client.renew('Job', ['j-1', 'j-2'], undefined, { actingAs: 'u-1' }), [{ xid: 'j-1' }])
+    mockFetch.mock.resetCalls()
+    assert.deepEqual(await client.renew('Job', []), [])
+    assert.equal(mockFetch.mock.callCount(), 0)
+  })
+
+  it('release sends release op and throws RECORD_LOCKED', async () => {
+    const client = createClient({ endpoint: 'http://localhost', token: 't' })
+
+    mockFetch.mock.mockImplementation(async (url, opts) => {
+      const body = JSON.parse(opts.body)
+      assert.equal(body.acting_as, 'u-1')
+      assert.deepEqual(body.operations[0], { op: 'release', entity: 'Job', data: ['j-1'] })
+      return mockResponse(200, { results: [{ data: 1, ok: true }] })
+    })
+    assert.equal(await client.release('Job', ['j-1'], { actingAs: 'u-1' }), 1)
+
+    mockFetch.mock.mockImplementation(async () =>
+      mockResponse(200, { results: [{ ok: false, error: { code: 'RECORD_LOCKED', message: 'held' } }] }))
+    await assert.rejects(client.release('Job', ['j-1']), e => e.code === 'RECORD_LOCKED')
+  })
+
+  it('op.claim and op.release build exec operations', () => {
+    assert.deepEqual(op.claim('Job', { _limit: 1 }, ['xid']), { op: 'claim', entity: 'Job', args: { _limit: 1 }, selections: { xid: null } })
+    assert.deepEqual(op.release('Job', ['j-1']), { op: 'release', entity: 'Job', data: ['j-1'] })
+  })
 })
 
 describe('subscriptions (records-only set-replace contract)', () => {

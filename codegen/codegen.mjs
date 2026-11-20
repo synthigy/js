@@ -364,7 +364,8 @@ for (const n of allEntities) nsOf(entityPascal(n))
 // Layer 2 — overlay declared ops as typed methods on their @namespace.
 // Mutations are Layer-1 territory (schema-derived Entity.sync/stack/delete) —
 // never emitted from XSQL. Skip LOUDLY, never silently.
-const MUTATE_VERBS = new Set(['sync', 'stack', 'delete'])
+const MUTATE_VERBS = new Set(['sync', 'stack', 'delete', 'release'])
+const resultType = (verb, T) => verb === 'get' ? `${T} | null` : verb === 'slice' ? T : `${T}[]`
 const genOps  = []   // generated reads, for @batch member resolution
 const batches = []
 for (const op of ir.operations) {
@@ -373,7 +374,9 @@ for (const op of ir.operations) {
     continue
   }
   if (MUTATE_VERBS.has(op.op)) {
-    console.warn(`skipped @${op.op} ${op.name} — mutations are generated from the schema; use ${entityPascal(op.entity ?? '<Entity>')}.${op.op}(data)`)
+    console.warn(op.op === 'release'
+      ? `skipped @release ${op.name} — use client.release('${op.entity ?? '<entity>'}', xids)`
+      : `skipped @${op.op} ${op.name} — mutations are generated from the schema; use ${entityPascal(op.entity ?? '<Entity>')}.${op.op}(data)`)
     continue
   }
   // Namespace defaults to the op's ROOT ENTITY (the model is the source of truth) —
@@ -391,13 +394,13 @@ for (const op of ir.operations) {
   const ParamsT     = pb ? `${Type}Params` : null
   const pArg        = ParamsT ? `params${allOptional ? '?' : ''}: ${ParamsT}, opts?: ExecOpts` : `opts?: ExecOpts`
   const pPass       = op.params?.length ? `params ?? {}` : '{}'
-  const ret         = op.op === 'get' ? `Promise<${Type} | null>` : `Promise<${Type}[]>`
+  const ret         = `Promise<${resultType(op.op, Type)}>`
   const methodName  = camel(op.name)
 
   genOps.push({ op, Type })
   if (ParamsT) g.typeAliases.push(`export type ${ParamsT} = {\n${pb}\n}`)
-  g.typeAliases.push(`export type ${Type} = ${isSql ? plainResultType(op.result) : projectionType(op.entity, op.result.fields)}`)
-  if (!isSql) g.typeAliases.push(`export const ${Type}Sel = ${JSON.stringify(fieldsToSel(op.result.fields), null, 2)} as const`)
+  g.typeAliases.push(`export type ${Type} = ${isSql ? plainResultType(op.result) : op.op === 'slice' ? 'Record<string, boolean>' : projectionType(op.entity, op.result.fields)}`)
+  if (!isSql && op.op !== 'slice') g.typeAliases.push(`export const ${Type}Sel = ${JSON.stringify(fieldsToSel(op.result.fields), null, 2)} as const`)
 
   // @description → JSDoc on the generated method (multiline-safe).
   const jsdoc = op.description
@@ -448,7 +451,7 @@ for (const b of batches) {
   const lines  = []
   if (pb) lines.push(`export type ${B}BatchParams = {\n${pb}\n}`)
   lines.push(`export type ${B}Batch = {\n${members.map(m =>
-    `  ${JSON.stringify(key(m))}: ${m.op.op === 'get' ? `${m.Type} | null` : `${m.Type}[]`} | SynthigyError`).join('\n')}\n}`)
+    `  ${JSON.stringify(key(m))}: ${resultType(m.op.op, m.Type)} | SynthigyError`).join('\n')}\n}`)
   const ops = members.map(({ op }) => op.op === 'sql-template'
     ? `    op.sqlTemplate(${xsqlLiteral(op.source)}, p),`
     : `    op.query(${xsqlLiteral(`@${op.op} ${op.name}\n` + op.source)}, p, ${JSON.stringify(op.op)}),`)
@@ -471,7 +474,7 @@ ${res.join('\n')}
 }
 if (batchChunks.length) batchChunks.unshift(`function _batchResult(r: OperationResult, verb: string): unknown {
   if (!r?.ok) return new SynthigyError(r?.error?.message ?? 'operation failed', r?.error?.code ?? 'OPERATION_FAILED', r?.error?.details, r?.error)
-  return verb === 'get' ? (r.data ?? null) : (r.data ?? [])
+  return verb === 'get' ? (r.data ?? null) : verb === 'slice' ? (r.data ?? {}) : (r.data ?? [])
 }`)
 
 // Emit one chunk per namespace: projection types + the object (reads + writes).

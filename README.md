@@ -54,6 +54,10 @@ Run it with `synthigy exec -- node hello.ts`.
 - **Writes that ORMs make you hand-roll.** `stack` adds a child without
   clobbering its siblings; `slice` detaches a link without deleting the record.
   Plus `sync` (upsert), `delete`, `purge`.
+- **Record locks.** `claim(entity, { …, _limit })` locks free rows to the caller
+  and returns them, `renew(entity, xids)` extends the lease (a row missing from
+  the answer is no longer held), `release(entity, xids)` frees them. A lock guards
+  only the row's own columns: delete, purge and links ignore it.
 
 - **Live data on one connection.** Open dozens of watches — they multiplex onto
   a single SSE per client. `watchQuery` for a live result set,
